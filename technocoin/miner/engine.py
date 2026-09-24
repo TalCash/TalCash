@@ -8,6 +8,11 @@ one hash (a few milliseconds).
 
 Nearly all the time goes into Argon2id inside libsodium, so this Python miner
 runs about as fast as a native one would.
+
+More workers isn't always faster: each hash needs 4 MiB, so once the workers'
+memory outgrows the CPU cache they compete for memory bandwidth. On a 12-core
+i9-10920X hashrate peaks around 8 workers and falls beyond that. The default is
+half the logical CPUs (about one per physical core); tune with --threads.
 """
 
 import multiprocessing
@@ -70,9 +75,13 @@ def _work(index: int, jobs, results, current_job, hash_counts) -> None:
                 break
 
 
+def default_workers() -> int:
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
 class Miner:
     def __init__(self, workers: int | None = None) -> None:
-        self.workers = workers or os.cpu_count() or 1
+        self.workers = workers or default_workers()
         context = multiprocessing.get_context("spawn")  # same behaviour on Windows, macOS and Linux
         self._current_job = context.RawValue("q", 0)
         self._hash_counts = context.RawArray("q", self.workers)

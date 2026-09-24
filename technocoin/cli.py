@@ -164,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     node = commands.add_parser("node", help="run a local node")
     node.add_argument("--mine", nargs="?", const="wallet", metavar="ADDRESS",
                       help="mine, paying ADDRESS (default: your wallet's first address)")
-    node.add_argument("--threads", type=int, help="mining processes (default: one per CPU core)")
+    node.add_argument("--threads", type=int, help="mining processes (default: half your logical CPUs, about one per physical core)")
     node.add_argument("--blocks", type=int, help="stop after mining this many blocks")
     node.add_argument("--reset", action="store_true", help="devnet only: delete the chain and start a fresh devnet")
     node.add_argument("--file", help=argparse.SUPPRESS)  # lets _load() find the wallet the same way as `tc wallet`

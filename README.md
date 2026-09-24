@@ -41,7 +41,11 @@ python -m technocoin --network devnet node --mine
 The node mines to your wallet's first address and prints every block: difficulty climbing as it
 adapts to your CPU, the chain settling at about one block per second, rewards unlocking after 100
 blocks. Stop it with Ctrl+C and start it again to continue the same chain; add `--reset` to throw
-the devnet away and start a fresh one. `--threads N` sets how many CPU cores mine.
+the devnet away and start a fresh one.
+
+`--threads N` sets how many processes mine. The default is about one per physical core. More
+rarely helps: every hash needs 4 MiB of memory, so extra workers just compete for memory
+bandwidth (that's what keeps big machines from dominating).
 
 ## Wallet
 

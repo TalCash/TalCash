@@ -14,6 +14,8 @@ from technocoin.node.chain import ChainManager
 from technocoin.node.network import GENESIS_FILE, load_params, reset_devnet
 from technocoin.node.runner import LocalNode
 from technocoin.node.store import Store
+from technocoin.wallet.keystore import INSECURE_FAST
+from technocoin.wallet.wallet import Wallet
 
 from chainutil import named_key
 
@@ -71,3 +73,10 @@ def test_cli_node_command(tmp_path, capsys):
     assert main(args) == 0  # restarting continues the same chain
     assert "#4 " in capsys.readouterr().out
     assert main(["--network", "regtest", "--datadir", str(tmp_path), "node", "--mine", "tc1bad"]) == 1
+
+
+def test_cli_mines_to_the_wallet_by_default(tmp_path, capsys):
+    wallet, _ = Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, "password1", strength=INSECURE_FAST)
+    args = ["--network", "regtest", "--datadir", str(tmp_path), "node", "--mine", "--blocks", "1", "--threads", "1"]
+    assert main(args) == 0
+    assert f"paying {wallet.addresses[0].address}" in capsys.readouterr().out
