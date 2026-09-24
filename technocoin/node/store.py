@@ -163,6 +163,15 @@ class Store:
         row = self._one("SELECT block_id FROM main_chain WHERE height = ?", (height,))
         return row[0] if row else None
 
+    def main_headers(self, first: int, last: int) -> list[BlockHeader]:
+        """Headers of the active chain from height `first` to `last`, in order."""
+        rows = self._db.execute(
+            "SELECT headers.header FROM main_chain JOIN headers ON headers.block_id = main_chain.block_id "
+            "WHERE main_chain.height BETWEEN ? AND ? ORDER BY main_chain.height",
+            (first, last),
+        )
+        return [header_from_bytes(row[0]) for row in rows]
+
     def set_main(self, height: int, block_id: bytes) -> None:
         self._db.execute("INSERT INTO main_chain (height, block_id) VALUES (?, ?)", (height, block_id))
 

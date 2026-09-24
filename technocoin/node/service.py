@@ -70,6 +70,10 @@ class NodeService:
         self.log = log
         self.clock = clock
         self.tip_version = 0  # bumps whenever the active chain changes (miners watch it)
+        # Called with (new tip block, origin) and (accepted transfer, origin); peers use these to
+        # pass news on. `origin` is whoever handed it to us (a peer), so it isn't sent straight back.
+        self.tip_listeners: list[Callable[[Block, object], None]] = []
+        self.tx_listeners: list[Callable[[Transfer, object], None]] = []
 
     @classmethod
     def open(cls, params: NetworkParams, base: Path | None = None, **options) -> "NodeService":
@@ -85,9 +89,12 @@ class NodeService:
 
     # --- changes ------------------------------------------------------------
 
-    def submit_block(self, block: Block, *, source: str, note: str = "") -> SubmitResult:
+    def submit_block(
+        self, block: Block, *, source: str, note: str = "", origin: object = None, quiet: bool = False
+    ) -> SubmitResult:
+        """`quiet` skips the per-block log line (used while catching up thousands of blocks)."""
         result = self.chain.submit_block(block)
-        self.mempool.update(result.connected, result.disconnected)
+        returned = self.mempool.update(result.connected, result.disconnected)
         if result.connected or result.disconnected:
             self.tip_version += 1
         if result.disconnected:
@@ -98,12 +105,20 @@ class NodeService:
                 "applied": [b.block_id.hex() for b in result.connected],
             }})
         for connected in result.connected:
-            self._announce_block(connected, source, note if connected.block_id == block.block_id else "")
+            self._announce_block(connected, source, note if connected.block_id == block.block_id else "", quiet)
+        if result.connected:
+            for listener in self.tip_listeners:
+                listener(result.connected[-1], origin)
+        for tx in returned:  # undone by a chain switch and waiting again: tell peers, it's news to them
+            for listener in self.tx_listeners:
+                listener(tx, None)
         return result
 
-    def submit_transaction(self, tx: Transaction) -> MempoolEntry:
+    def submit_transaction(self, tx: Transaction, *, origin: object = None) -> MempoolEntry:
         entry = self.mempool.add(tx)
         assert isinstance(tx, Transfer)
+        for listener in self.tx_listeners:
+            listener(tx, origin)
         data = {"txid": tx.txid.hex(), "from": self.address_text(tx.sender), "fee": amount(tx.fee),
                 "outputs": [{"address": self.address_text(o.address), "amount": amount(o.amount)} for o in tx.outputs]}
         self.events.publish("mempool", {"event": "tx", "data": data})
@@ -116,17 +131,18 @@ class NodeService:
     def template(self, miner: bytes, *, memo: bytes = b"") -> Block:
         return build_template(self.chain, self.mempool, miner, now=int(self.clock()), memo=memo)
 
-    def _announce_block(self, block: Block, source: str, note: str) -> None:
+    def _announce_block(self, block: Block, source: str, note: str, quiet: bool = False) -> None:
         header = block.header
-        parent = self.store.header(header.prev_id).header
-        genesis = self.chain.genesis.header
-        behind = (header.timestamp - genesis.timestamp) - header.height * self.params.target_spacing
-        schedule = f"{abs(behind)}s {'behind' if behind > 0 else 'ahead of'} schedule" if behind else "on schedule"
-        self.log(
-            f"{time.strftime('%H:%M:%S')}  #{header.height:<6} {block.block_id.hex()[:12]}  "
-            f"txs {len(block.transactions) - 1:<3} difficulty {difficulty(header.target, self.params):8.2f}  "
-            f"+{header.timestamp - parent.timestamp}s  {schedule}  [{source}{', ' + note if note else ''}]"
-        )
+        if not quiet:
+            parent = self.store.header(header.prev_id).header
+            genesis = self.chain.genesis.header
+            behind = (header.timestamp - genesis.timestamp) - header.height * self.params.target_spacing
+            schedule = f"{abs(behind)}s {'behind' if behind > 0 else 'ahead of'} schedule" if behind else "on schedule"
+            self.log(
+                f"{time.strftime('%H:%M:%S')}  #{header.height:<6} {block.block_id.hex()[:12]}  "
+                f"txs {len(block.transactions) - 1:<3} difficulty {difficulty(header.target, self.params):8.2f}  "
+                f"+{header.timestamp - parent.timestamp}s  {schedule}  [{source}{', ' + note if note else ''}]"
+            )
         self.events.publish("blocks", {"event": "block", "data": {
             "height": header.height, "id": block.block_id.hex(), "time": header.timestamp,
             "txs": len(block.transactions) - 1, "difficulty": difficulty(header.target, self.params)}})

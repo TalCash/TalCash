@@ -8,7 +8,8 @@
     tc wallet balance                balances (asks the node)
     tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...]    send coins (one or many receivers)
     tc wallet history                recent transactions
-    tc node [--mine [ADDRESS]]       run a node, optionally mining (to your wallet by default)
+    tc node [--mine [ADDRESS]] [--peer URL ...]   run a node, optionally mining (to your wallet by default)
+    tc devnet [--nodes 3] [--miners 2]            a whole local network of devnet nodes
 
 Global options: --network mainnet|testnet|devnet|regtest, --datadir DIR.
 Wallet commands that need a node use --node URL (default: this computer).
@@ -26,7 +27,8 @@ from .core.amounts import format_amount, parse_amount
 from .core.params import NETWORKS, NetworkParams
 from .core.tx import MAX_MEMO_SIZE, MAX_OUTPUTS, Output, Transfer
 from .crypto.address import decode_address
-from .node.network import load_params, reset_devnet
+from .devnet import run_devnet
+from .node.network import has_devnet, join_devnet, load_params, reset_devnet
 from .node.server import run_node
 from .wallet.client import NodeClient, NodeError
 from .wallet.keystore import WrongPassword
@@ -264,13 +266,28 @@ def cmd_node(args: argparse.Namespace, params: NetworkParams) -> int:
             raise CommandError("--reset only works on devnet")
         for path in reset_devnet(base):
             print(f"removed {path}")
+    if params.name == "devnet" and not has_devnet(base) and args.peer:
+        join_devnet(args.peer[0], base)  # join that devnet instead of starting a new one
     params = load_params(params.name, base)
     miner = None
     if args.mine is not None:
         text = _load(args, params).addresses[0].address if args.mine == "wallet" else args.mine
         miner = decode_address(text, params.address_prefix)
     run_node(params, base, host=args.host, port=args.port, miner=miner, workers=args.threads,
-             blocks=args.blocks, min_fee_per_byte=args.min_fee)
+             blocks=args.blocks, min_fee_per_byte=args.min_fee, peers=args.peer, public_url=args.public_url)
+    return 0
+
+
+def cmd_devnet(args: argparse.Namespace, params: NetworkParams) -> int:
+    base = Path(args.datadir) if args.datadir else paths.base_dir()
+    mine_to = args.mine_to
+    if mine_to is None and paths.default_wallet_path("devnet", base).exists():
+        mine_to = Wallet.load(paths.default_wallet_path("devnet", base)).addresses[0].address
+    if mine_to is not None:
+        decode_address(mine_to, "td")
+        print(f"Miners pay {mine_to}")
+    run_devnet(base, nodes=args.nodes, miners=args.miners, threads=args.threads, mine_to=mine_to,
+               seconds=args.seconds, reset=args.reset)
     return 0
 
 
@@ -318,9 +335,22 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--host", default="127.0.0.1", help="API address to listen on (default: this computer only)")
     node.add_argument("--port", type=int, help="API port (default: the network's port)")
     node.add_argument("--min-fee", type=int, default=1, help="smallest fee this node relays, in base units per byte")
+    node.add_argument("--peer", action="append", default=[], metavar="URL",
+                      help="another node to connect to, e.g. ws://127.0.0.1:64188/v1/p2p (repeatable)")
+    node.add_argument("--public-url", metavar="URL", help="how other nodes can reach this one (ws://host:port/v1/p2p)")
     node.add_argument("--reset", action="store_true", help="devnet only: delete the chain and start a fresh devnet")
     node.add_argument("--file", help=argparse.SUPPRESS)  # lets _load() find the wallet the same way as `tc wallet`
     node.set_defaults(handler=cmd_node)
+
+    devnet = commands.add_parser("devnet", help="run a whole local devnet: several nodes on this computer")
+    devnet.add_argument("--nodes", type=int, default=3, help="how many nodes (ports 64187, 64188, ...)")
+    devnet.add_argument("--miners", type=int, default=2, help="how many of them mine")
+    devnet.add_argument("--threads", type=int, default=2, help="mining processes per miner")
+    devnet.add_argument("--mine-to", metavar="ADDRESS",
+                        help="address for mining rewards (default: your devnet wallet, else throwaway addresses)")
+    devnet.add_argument("--seconds", type=float, help="stop after this many seconds")
+    devnet.add_argument("--reset", action="store_true", help="start a brand-new devnet")
+    devnet.set_defaults(handler=cmd_devnet)
     return parser
 
 

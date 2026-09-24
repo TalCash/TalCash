@@ -152,8 +152,11 @@ class Mempool:
 
     # --- keeping up with the chain ------------------------------------------
 
-    def update(self, connected: list[Block], disconnected: list[Block]) -> None:
-        """Call after the active chain changed (ChainManager's SubmitResult lists)."""
+    def update(self, connected: list[Block], disconnected: list[Block]) -> list[Transfer]:
+        """Call after the active chain changed (ChainManager's SubmitResult lists).
+
+        Returns the transfers from undone blocks that are waiting again (peers must hear about them).
+        """
         confirmed = {tx.txid for block in connected for tx in block.transactions}
         returning = [
             tx for block in disconnected for tx in block.transactions[1:]
@@ -178,6 +181,7 @@ class Mempool:
                 self._insert(tx, added)
             except ValidationError:
                 pass  # no longer valid on the new chain
+        return [tx for tx in returning if tx.txid in self._by_id]
 
     def expire(self) -> int:
         """Drop transfers older than `expiry` (and their sender's later ones). Returns how many."""

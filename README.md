@@ -19,14 +19,15 @@ The full rules are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 technocoin/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
 technocoin/crypto/   keys, passphrases, addresses
 technocoin/wallet/   encrypted wallet file, node client
-technocoin/node/     chain (SQLite, branches, finality), mempool, API server, built-in miner
+technocoin/node/     chain (SQLite, branches, finality), mempool, API server, peer-to-peer, built-in miner
 technocoin/miner/    multi-core Argon2id miner
+technocoin/devnet.py `tc devnet`: several local nodes at once
 technocoin/cli.py    the `tc` command
 tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
 
-Coming next: peer-to-peer sync with chunks (several nodes), then launch.
+Coming next: hardening, chunk files for fast sync, a public testnet, then launch.
 
 ## Try it: a local devnet
 
@@ -55,6 +56,20 @@ python -m technocoin --network devnet wallet send td1... 12.5 --memo "thanks" --
 python -m technocoin --network devnet wallet send td1... 3 td1... 1.25    # several receivers, one payment
 python -m technocoin --network devnet wallet history
 ```
+
+## Several nodes on one computer
+
+```
+python -m technocoin devnet --nodes 3 --miners 2
+```
+
+Starts three devnet nodes as separate processes (ports 64187, 64188, 64189), all connected, two of
+them mining against each other; every line of output is tagged with its node. Miners pay your
+devnet wallet if you have one. Wallet commands talk to the first node by default; use
+`wallet --node http://127.0.0.1:64189 ...` for another. `--reset` starts a brand-new devnet.
+
+To connect nodes by hand: `tc node --peer ws://HOST:PORT/v1/p2p` (repeatable). A new devnet node
+started with `--peer` joins that devnet instead of creating its own.
 
 ## Wallet
 

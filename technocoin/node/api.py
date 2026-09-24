@@ -9,7 +9,9 @@
     GET  /v1/address/{address}/history   transactions, newest first
     GET  /v1/mining/template?address=    a block to mine
     POST /v1/mining/submit               {"hex": ...} a mined block
+    GET  /v1/peers                       connected nodes
     WS   /v1/ws                          send {"subscribe": ["blocks", "mempool", "address:<addr>"]}
+    WS   /v1/p2p                         node-to-node protocol (see p2p.py)
 
 Errors are {"error": code, "detail": text} with a 4xx status.
 """
@@ -31,6 +33,7 @@ from ..core.difficulty import difficulty
 from ..core.errors import DecodeError, ValidationError
 from ..core.tx import Coinbase, transaction_from_bytes
 from ..crypto.address import decode_address, is_valid_address
+from .p2p import P2PConfig, PeerManager
 from .service import HistoryItem, NodeService
 from .views import amount, block_view, tx_view
 
@@ -51,14 +54,22 @@ class HexBody(BaseModel):
     hex: str
 
 
-def create_app(open_service: Callable[[], NodeService], background: list[BackgroundTask] | None = None) -> FastAPI:
-    """`open_service` runs inside the server's event loop (SQLite connections belong to one thread)."""
+def create_app(
+    open_service: Callable[[], NodeService],
+    background: list[BackgroundTask] | None = None,
+    p2p: P2PConfig | None = None,
+) -> FastAPI:
+    """`open_service` runs inside the server's event loop (SQLite connections belong to one thread).
+    With `p2p`, the node also talks to other nodes at /v1/p2p."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         service = open_service()
         app.state.service = service
+        app.state.peers = PeerManager(service, p2p) if p2p is not None else None
         tasks = [asyncio.create_task(task(service)) for task in background or []]
+        if app.state.peers is not None:
+            tasks.append(asyncio.create_task(app.state.peers.run()))
         for task in tasks:
             task.add_done_callback(lambda t: _report_failure(t, service))
         try:
@@ -125,7 +136,20 @@ def create_app(open_service: Callable[[], NodeService], background: list[Backgro
             "address_prefix": params.address_prefix,
             "min_fee_per_byte": amount(service.mempool.min_fee_per_byte),
             "mempool": {"count": len(service.mempool), "bytes": service.mempool.size_bytes},
+            "peers": len(request.app.state.peers.ready_peers) if request.app.state.peers else 0,
         }
+
+    @app.get("/v1/genesis")
+    async def genesis(request: Request) -> dict:
+        service = service_of(request)
+        block = service.chain.genesis
+        return {"network": service.params.name, "id": block.block_id.hex(), "timestamp": block.header.timestamp,
+                "message": block.coinbase.memo.hex(), "nonce": block.header.nonce}
+
+    @app.get("/v1/peers")
+    async def peers(request: Request) -> list[dict]:
+        manager = request.app.state.peers
+        return manager.status() if manager else []
 
     @app.get("/v1/blocks/{ref}")
     async def get_block(ref: str, request: Request, format: str = "json") -> dict:
@@ -159,7 +183,7 @@ def create_app(open_service: Callable[[], NodeService], background: list[Backgro
         except DecodeError as error:
             raise ApiError(400, "bad-encoding", str(error)) from None
         try:
-            service.submit_transaction(tx)
+            service.submit_transaction(tx, origin=None)
         except ValidationError as error:
             raise ApiError(400, error.code, error.detail) from None
         return {"txid": tx.txid.hex(), "status": "pending"}
@@ -230,6 +254,14 @@ def create_app(open_service: Callable[[], NodeService], background: list[Backgro
         result = service.submit_block(block, source="api")
         return {"id": block.block_id.hex(), "result": result.outcome.value,
                 "error": result.error.code if result.error else None}
+
+    @app.websocket("/v1/p2p")
+    async def peer_to_peer(socket: WebSocket) -> None:
+        manager = socket.app.state.peers
+        if manager is None:
+            await socket.close(code=1008)
+            return
+        await manager.accept(socket)
 
     @app.websocket("/v1/ws")
     async def websocket(socket: WebSocket) -> None:

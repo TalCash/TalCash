@@ -101,12 +101,17 @@ class Miner:
             process.start()
 
     def mine(self, header: BlockHeader, pow_params: PowParams) -> int:
-        """Start (or switch to) mining this header. Returns the job id."""
+        """Start (or switch to) mining this header. Returns the job id.
+
+        The search starts at a random nonce: two miners with identical templates (for example two
+        machines paying the same address) would otherwise compute exactly the same hashes.
+        """
         self._job_id += 1
         self._current_job.value = self._job_id
         prefix = header.serialize()[:-_NONCE_SIZE]
+        start = int.from_bytes(os.urandom(8), "big") >> 1  # the lower half of the range: never runs out
         for i, jobs in enumerate(self._jobs):
-            jobs.put(Job(self._job_id, prefix, header.target, pow_params, i, self.workers))
+            jobs.put(Job(self._job_id, prefix, header.target, pow_params, start + i, self.workers))
         return self._job_id
 
     def wait(self, timeout: float) -> int | None:

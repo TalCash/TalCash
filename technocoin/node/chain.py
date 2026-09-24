@@ -107,6 +107,27 @@ class ChainManager:
         stored = self.store.header(block_id)
         return stored is not None and self.store.main_id(stored.height) == block_id
 
+    def locator(self) -> list[bytes]:
+        """Ids of our active chain for a peer to find where our chains split:
+        the last 10 blocks, then ever bigger steps back, always ending with genesis."""
+        ids, height, step = [], self.tip_height, 1
+        while height > 0:
+            ids.append(self.store.main_id(height))
+            if len(ids) >= 10:
+                step *= 2
+            height -= step
+        ids.append(self.genesis.block_id)
+        return ids
+
+    def headers_after(self, locator: list[bytes], limit: int) -> list[BlockHeader]:
+        """Our active chain's headers after the first locator block we also have on it."""
+        start = 1
+        for block_id in locator:
+            if self.is_on_main_chain(block_id):
+                start = self.store.header(block_id).height + 1
+                break
+        return self.store.main_headers(start, min(self.tip_height, start + limit - 1))
+
     def median_time_past(self, block_id: bytes) -> int:
         """Median timestamp of this block and up to 10 ancestors (works on any branch)."""
         timestamps = []

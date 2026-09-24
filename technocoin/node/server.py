@@ -12,6 +12,7 @@ from ..core.block import Block
 from ..core.params import NetworkParams
 from ..miner.engine import Miner
 from .api import create_app
+from .p2p import MAX_MESSAGE_BYTES, P2PConfig
 from .chain import Outcome
 from .service import NodeService, print_now
 
@@ -53,8 +54,9 @@ async def mining_loop(
                 found += 1
             elif result.outcome is Outcome.SIDE_BRANCH:
                 service.log("found a block, but another block at that height arrived first")
-            else:
-                service.log(f"own block rejected: {result.outcome.value} {result.error or ''}")
+            elif result.outcome is Outcome.INVALID:
+                service.log(f"own block rejected: {result.error}")
+            # DUPLICATE: another node found and sent the very same block first; nothing to report
     finally:
         await loop.run_in_executor(None, engine.close)
     if on_finished is not None:
@@ -79,10 +81,19 @@ def run_node(
     workers: int | None = None,
     blocks: int | None = None,
     min_fee_per_byte: int = 1,
+    peers: list[str] | None = None,
+    public_url: str | None = None,
     log: Callable[[str], None] = print_now,
 ) -> None:
-    """Run until Ctrl+C (or until `blocks` blocks are mined)."""
+    """Run until Ctrl+C (or until `blocks` blocks are mined).
+
+    `peers` are nodes to stay connected to (ws://host:port/v1/p2p). `public_url` is how other
+    nodes can reach this one; by default it's derived from host and port when those are specific.
+    """
     port = params.default_port if port is None else port
+    if public_url is None and host not in ("0.0.0.0", "::") and port != 0:
+        public_url = f"ws://{host}:{port}/v1/p2p"
+    p2p = P2PConfig(listen_url=public_url, connect=list(peers or []))
     server: uvicorn.Server | None = None
 
     def stop() -> None:
@@ -92,6 +103,8 @@ def run_node(
         service = NodeService.open(params, base, min_fee_per_byte=min_fee_per_byte, log=log)
         log(service.describe())
         log(f"API on http://{host}:{port}/v1/status (interactive docs: http://{host}:{port}/docs)")
+        if public_url:
+            log(f"other nodes can connect to {public_url}")
         return service
 
     background = [housekeeping]
@@ -99,7 +112,7 @@ def run_node(
         background.append(lambda service: mining_loop(
             service, miner, workers=workers, blocks=blocks, on_finished=stop if blocks is not None else None))
 
-    config = uvicorn.Config(create_app(open_service, background), host=host, port=port,
-                            log_level="warning", ws="websockets-sansio", ws_max_size=1 << 20, lifespan="on")
+    config = uvicorn.Config(create_app(open_service, background, p2p), host=host, port=port, log_level="warning",
+                            ws="websockets-sansio", ws_max_size=MAX_MESSAGE_BYTES, lifespan="on")
     server = uvicorn.Server(config)
     server.run()

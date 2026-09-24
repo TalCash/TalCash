@@ -14,7 +14,8 @@ Status of each part:
 | Chain selection, reorganisation, finality | Implemented in `technocoin/node/chain.py` and tested |
 | Mempool policy, block templates, miner | Implemented and tested |
 | Node API (HTTP + WebSocket) | Implemented and tested |
-| Chunk files, mega chunks, fast sync, P2P | Planned (step 6), outline only |
+| Peer-to-peer: handshake, spreading blocks and transfers, catching up | Implemented and tested with several real nodes |
+| Chunk files, mega chunks, fast sync, pruning | Planned, outline only (section 12) |
 
 ---
 
@@ -347,10 +348,37 @@ The node answers `{"event": "subscribed", ...}` and then pushes `block`, `reorg`
 events (`address` events say `pending` or `confirmed`). A client that falls more than 1,000 events
 behind is disconnected.
 
-## 16. Peer-to-peer (planned)
+## 16. Peer-to-peer
 
-- Nodes talk to each other over WebSocket on the same port.
-- Handshake exchanges network id, genesis id, height and total work. Every message has a request id,
-  a size limit and a checked schema; misbehaving peers are disconnected.
-- New blocks and transfers are announced by id; peers fetch only what they don't have.
-- Sync: headers first, then chunks (section 12).
+Nodes talk over WebSocket at `/v1/p2p` on the node's port, one JSON object per message, each with a
+`type`. Blocks, headers and transactions travel as hex. Messages are at most 4 MB.
+
+| Message | Meaning |
+|---|---|
+| `hello` | first message both ways: protocol version, network, genesis id, random node id, height, total work, listen URL |
+| `inv` | "I have these": block and/or transaction ids (at most 1,000) |
+| `get_data` | "send me these" |
+| `block`, `tx` | the data itself |
+| `not_found` | ids we were asked for but don't have |
+| `get_headers` | a block locator: our ids, the last 10 then ever bigger steps back, ending with genesis |
+| `headers` | up to 2,000 headers after the first locator block the peer also has on its active chain |
+| `get_peers`, `peers` | addresses of other nodes (at most 100) |
+
+- **Handshake**: a different network or genesis, an unknown protocol version, or no hello within
+  10 seconds disconnects. A node that reaches itself (same node id) or a node it's already
+  connected to closes the extra connection and doesn't dial that address again.
+- **Spreading news**: every new tip and every accepted transfer (including transfers that come back
+  after a chain switch) is announced by id to peers not known to have it; peers fetch what they
+  lack. A newly connected peer is told about everything in the mempool.
+- **Catching up**: when a peer has more total work (from its hello), or sends a block whose parent
+  is missing, the node asks it for headers after its locator and downloads those blocks 64 at a
+  time, in order. One peer at a time; a peer that stalls for 30 seconds is dropped for another.
+- **Misbehaviour**: malformed or oversized messages, blocks that break a rule, or claiming blocks it
+  can't send get a peer disconnected. A block from slightly in the future or from a fork below our
+  finality is not treated as misbehaviour, but that peer isn't used for catching up.
+- Each peer has its own send queue (5,000 messages); a peer that can't keep up is disconnected.
+- Nodes keep up to 8 outbound connections (`--peer` addresses first, then learned ones) and accept
+  up to 32 inbound.
+
+Planned: chunk files for fast bulk sync (section 12), remembering learned addresses across restarts,
+per-peer rate limits.
