@@ -17,6 +17,7 @@ Status of each part:
 | Peer-to-peer: handshake, spreading blocks and transfers, catching up | Implemented and tested with several real nodes |
 | Block files and sealed chunk files, rebuild from files, reader | Implemented and tested (section 12) |
 | Catching up by downloading chunk files, remembered peers | Implemented and tested with several real nodes |
+| Hardening: headers-first sync, per-peer limits and bans, public API mode | Implemented; tested with real nodes, hostile hand-written peers and fuzzing |
 | Mega chunks, fast sync from snapshots, pruning | Planned (section 12) |
 
 ---
@@ -275,8 +276,10 @@ mainnet, 60 on devnet).
   64 blocks keeps the file at about 40% of the raw size, while reading one block unpacks only its group.
 - A chunk file is checked completely when read: checksum, structure, chunk root, and every block
   linking to the one before. Importing it then applies every consensus rule to every block, in one
-  database transaction, with proof of work checked on all CPU cores: about 1.3 ms per block
-  (a year of mainnet in about 12 minutes), against about 10 ms per block one at a time.
+  database transaction, with proof of work checked on all CPU cores: about 1 ms per block with
+  mainnet settings (a year of mostly empty blocks in about 10 minutes), against about 10 ms per
+  block one at a time. A segment that would unpack to more than 64 full blocks is refused before
+  it is unpacked any further, so a small malicious file can't expand to fill a node's memory.
 - Nodes serve sealed chunk files at `GET /v1/chunks/{index}`. `tc read FILE` prints any block or
   chunk file as JSON after checking it.
 
@@ -290,7 +293,7 @@ Chunk and mega-chunk roots are computed from block ids, so they are not consensu
 levels (a decade, all of history) can be added at any time without changing the protocol.
 
 **Syncing** today (section 16): sealed chunk files downloaded from a peer and imported a whole day
-at a time, then the newer blocks by headers and batches. Planned on top of that, either:
+at a time, then the newer blocks headers first, in batches. Planned on top of that, either:
 - **Full sync**: every chunk from genesis, applying every block.
 - **Fast sync**: the balances at the latest final snapshot (checked against the `snapshot_root` in
   the headers), the `coinbase_maturity` blocks ending at the snapshot (their rewards mature after
@@ -352,7 +355,13 @@ told otherwise. Interactive documentation is served at `/docs`.
   Ids are lowercase hex; addresses are in text form.
 - Errors: `{"error": code, "detail": text}` with a 4xx status. Codes are the validation codes of
   this document (`insufficient-funds`, `nonce-gap`, `bad-signature`, ...) plus `bad-hex`,
-  `bad-encoding`, `bad-address`, `unknown-block`, `unknown-transaction`, `too-large`.
+  `bad-encoding`, `bad-address`, `unknown-block`, `unknown-transaction`, `too-large`,
+  `rate-limited` (429), `local-only` (403).
+- **Public mode**: a node listening beyond this computer (`--host 0.0.0.0`, needed to accept peers
+  from other machines) limits every client that isn't this computer or an address given with
+  `--trust`: 20 requests a second (bursts of 100), no mining endpoints, lists of at most 100 items,
+  at most 4 WebSocket subscriptions per address and 100 topics each, 2,000 open connections in all.
+  Behind a reverse proxy every client would look local, so a public node shouldn't sit behind one.
 
 | Endpoint | |
 |---|---|
@@ -375,7 +384,8 @@ behind is disconnected.
 ## 16. Peer-to-peer
 
 Nodes talk over WebSocket at `/v1/p2p` on the node's port, one JSON object per message, each with a
-`type`. Blocks, headers and transactions travel as hex. Messages are at most 4 MB.
+`type`. Blocks, headers and transactions travel as hex. Messages are at most 4 MB. Unknown message
+types are ignored, so later versions can add messages.
 
 | Message | Meaning |
 |---|---|
@@ -393,24 +403,38 @@ Nodes talk over WebSocket at `/v1/p2p` on the node's port, one JSON object per m
   connected to closes the extra connection and doesn't dial that address again.
 - **Spreading news**: every new tip and every accepted transfer (including transfers that come back
   after a chain switch) is announced by id to peers not known to have it; peers fetch what they
-  lack. A newly connected peer is told about everything in the mempool.
+  lack. A newly connected peer is told about everything in the mempool. A node only passes on
+  blocks it has fully validated.
 - **Catching up**: when a peer has more total work (from its hello), or sends a block whose parent
-  is missing, the node catches up from it, one peer at a time:
+  is missing, the node catches up from it, one peer at a time. (A block with a missing parent isn't
+  kept; it comes again during the catch-up.)
   1. **Whole days first**: if the peer has sealed chunks the node doesn't, it downloads them from the
      peer's API (`GET /v1/chunks/{index}`, same port) one by one. Each is checked in a background
      thread (file integrity, links, every proof of work) and then applied in one database
      transaction with every rule checked (section 12).
-  2. **Then block by block**: headers after its locator, then those blocks 64 at a time, in order.
+  2. **Then headers first**: headers after its locator, each checked before any block is fetched:
+     links, height, version, timestamp (median rule and future drift), the exact ASERT target, and
+     proof of work (on all cores). Only if the checked headers add up to more total work than the
+     node's own chain are their blocks downloaded, 64 at a time, in order (their proof of work isn't
+     computed a second time). A peer whose headers promise less work is simply not followed.
 
   A chunk that doesn't continue the node's own chain, or that can't be downloaded, just means
-  going block by block. A peer that stalls for 30 seconds is dropped for another.
-- **Misbehaviour**: malformed or oversized messages, blocks that break a rule, damaged or invalid
-  chunk files, or claiming blocks it can't send get a peer disconnected. A peer that sent a bad chunk
-  is also refused, in both directions, for 10 minutes. A block from slightly in the future or from a
-  fork below our finality is not treated as misbehaviour, but that peer isn't used for catching up.
-- Each peer has its own send queue (5,000 messages); a peer that can't keep up is disconnected.
+  going on with headers. A peer that stalls for 30 seconds is dropped for another.
+- **Limits**: every message costs the sender some of its budget: 500 units a second, saving up to
+  5,000. Most messages cost 1; `get_headers` 250, `get_peers` 50, `peers` 5, `block` 5, `tx` 2,
+  plus 2 per block and 0.1 per transfer requested in a `get_data` and 0.01 per id in an `inv`. A peer
+  over budget isn't disconnected: the node stops reading from it until the budget allows, so a
+  flood only slows the flooder down. Requested blocks are read from disk one at a time as they're
+  sent. At most 4 inbound connections per IP address (connections from the same computer don't
+  count), 32 inbound in all, and 5,000 queued messages per peer (a peer that can't keep up is
+  disconnected).
+- **Misbehaviour**: anything an honest node never does gets the peer disconnected and **banned for
+  an hour**, by node id and by IP address (a node on the same computer only by node id): malformed
+  messages, invalid blocks or headers, headers with fake proof of work, damaged or invalid chunk
+  files, and transfers that break a stateless rule (section 4.3, e.g. a bad signature). Not
+  misbehaviour: a block slightly in the future or on a fork below our finality (that peer just isn't
+  used for catching up), transfers that are only invalid for now (nonce gap, fee below our minimum,
+  already mined...), a block announced but no longer available (disconnect only).
 - Nodes keep up to 8 outbound connections (`--peer` addresses first, then learned ones) and accept
   up to 32 inbound. Addresses the node managed to connect to are saved in `peers.json` next to the
   chain, so a restarted node reconnects without `--peer`.
-
-Planned: per-peer rate limits.

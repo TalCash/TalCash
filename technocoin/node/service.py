@@ -178,7 +178,7 @@ class NodeService:
         confirmed = self.chain.get_account(address)
         pending = self.mempool.pending_for(address)
         pending_in = sum(
-            o.amount for e in self.mempool.entries() for o in e.tx.outputs if o.address == address
+            o.amount for e in self.mempool.incoming_for(address) for o in e.tx.outputs if o.address == address
         )
         tip = self.chain.tip_height
         immature = 0
@@ -195,11 +195,7 @@ class NodeService:
 
     def history(self, address: bytes, limit: int = 50) -> list[HistoryItem]:
         """Waiting transfers first, then confirmed transactions, newest first."""
-        items = [
-            HistoryItem(e.tx, None, None)
-            for e in sorted(self.mempool.entries(), key=lambda e: -e.added)
-            if e.tx.sender == address or any(o.address == address for o in e.tx.outputs)
-        ][:limit]
+        items = [HistoryItem(e.tx, None, None) for e in self.mempool.involving(address)][:limit]
         for height, position, _ in self.store.address_history(address, limit - len(items)):
             block = self.chain.main_block(height)
             location = TxLocation(block.block_id, height, position)

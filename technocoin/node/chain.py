@@ -18,16 +18,17 @@ Finality: the node never accepts a block that forks off more than
 """
 
 import time
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ..core.block import Block, BlockHeader, block_from_bytes, check_block
+from ..core.block import BLOCK_VERSION, Block, BlockHeader, block_from_bytes, check_block
 from ..core.difficulty import block_work, median_time_past, next_target
 from ..core.errors import DecodeError, ValidationError
 from ..core.genesis import genesis_block
-from ..core.params import NetworkParams
+from ..core.params import NetworkParams, PowParams
 from ..core.pow import meets_target
 from ..core.snapshot import NO_SNAPSHOT, is_snapshot_point, snapshot_height, state_root
 from ..core.state import Account, BlockContext, apply_block, check_header_against_parent, check_not_in_future
@@ -63,6 +64,24 @@ class CheckedChunk:
     blocks: list[Block]
 
 
+@dataclass(frozen=True)
+class HeaderTip:
+    """The end of a chain of checked headers (their blocks may not be downloaded yet)."""
+
+    header: BlockHeader
+    chain_work: int
+    recent_times: tuple[int, ...]  # timestamps of this header and up to 10 before it, newest first
+
+
+def all_meet_target(headers: list[BlockHeader], pow_params: PowParams) -> bool:
+    """Proof of work of many headers, on all cores (Argon2 releases the GIL, so threads really run
+    in parallel). Touches no database, so a node can run it in a background thread."""
+    if len(headers) <= 1:
+        return all(meets_target(h, pow_params) for h in headers)
+    with ThreadPoolExecutor() as pool:
+        return all(pool.map(lambda h: meets_target(h, pow_params), headers))
+
+
 def check_chunk_file(data: bytes, params: NetworkParams) -> CheckedChunk:
     """File integrity, shape and every block's proof of work (on all cores).
 
@@ -78,9 +97,8 @@ def check_chunk_file(data: bytes, params: NetworkParams) -> CheckedChunk:
         blocks = [block_from_bytes(b) for b in chunk.blocks]
     except DecodeError as error:
         raise ValidationError("bad-chunk", f"unreadable block: {error}") from None
-    with ThreadPoolExecutor() as pool:  # Argon2 releases the GIL, so threads really run in parallel
-        if not all(pool.map(lambda b: meets_target(b.header, params.pow), blocks)):
-            raise ValidationError("bad-pow", "a block in the chunk has invalid proof of work")
+    if not all_meet_target([b.header for b in blocks], params.pow):
+        raise ValidationError("bad-pow", "a block in the chunk has invalid proof of work")
     return CheckedChunk(data, chunk, blocks)
 
 
@@ -92,6 +110,8 @@ class _ConnectFailed(Exception):
 
 class ChainManager:
     MAX_ORPHANS = 256
+    MAX_ORPHAN_BYTES = 16_000_000
+    POW_CHECKED_LIMIT = 100_000
 
     def __init__(self, store: Store, params: NetworkParams, *, clock: Callable[[], float] = time.time) -> None:
         self.store = store
@@ -99,6 +119,10 @@ class ChainManager:
         self.clock = clock
         self.genesis = genesis_block(params)
         self._orphans: dict[bytes, Block] = {}  # block id -> block (insertion ordered, oldest first)
+        self._orphan_bytes = 0
+        # Ids of headers whose proof of work was already checked (while syncing headers first), so
+        # their blocks don't pay for it twice. Safe: the id is the hash of the whole header.
+        self._pow_checked: OrderedDict[bytes, None] = OrderedDict()
         self._init_genesis()
 
     def _init_genesis(self) -> None:
@@ -180,6 +204,58 @@ class ChainManager:
     def expected_target(self, parent: BlockHeader) -> int:
         return next_target(self.params, self.genesis.header, parent)
 
+    # --- checking headers before their blocks (headers-first sync) ------------------
+
+    def header_tip(self, block_id: bytes) -> HeaderTip | None:
+        """A stored block as the starting point for checking the headers that follow it."""
+        stored = self.store.header(block_id)
+        if stored is None:
+            return None
+        times, current = [], stored
+        while current is not None and len(times) < self.params.median_time_span:
+            times.append(current.header.timestamp)
+            current = self.store.header(current.header.prev_id) if current.height > 0 else None
+        return HeaderTip(stored.header, stored.chain_work, tuple(times))
+
+    def check_branch_point(self, block_id: bytes) -> None:
+        """May a branch continue from this stored block? Raises ValidationError if the block is
+        invalid or the branch would fork below the finalized height."""
+        stored = self.store.header(block_id)
+        if stored is None:
+            raise ValidationError("unknown-parent")
+        if stored.status == STATUS_INVALID:
+            raise ValidationError("invalid-parent")
+        self._check_finality(stored)
+
+    def check_headers(self, tip: HeaderTip, headers: list[BlockHeader]) -> tuple[HeaderTip, list[BlockHeader]]:
+        """Every header rule except proof of work (see all_meet_target) for headers following `tip`.
+
+        Returns the new tip and the headers that passed. Stops early, without error, at a header
+        timestamped too far in the future (that can be our clock, not the sender's fault).
+        Raises ValidationError for anything else.
+        """
+        now, span = int(self.clock()), self.params.median_time_span
+        checked: list[BlockHeader] = []
+        for header in headers:
+            try:
+                check_not_in_future(header, now, self.params)
+            except ValidationError:
+                break
+            if header.version != BLOCK_VERSION:
+                raise ValidationError("bad-version", f"block version {header.version}")
+            check_header_against_parent(header, tip.header, median_time_past(tip.recent_times),
+                                        self.expected_target(tip.header), self.params, check_pow=False)
+            tip = HeaderTip(header, tip.chain_work + block_work(header.target),
+                            (header.timestamp, *tip.recent_times[:span - 1]))
+            checked.append(header)
+        return tip, checked
+
+    def note_pow_checked(self, block_ids: Iterable[bytes]) -> None:
+        for block_id in block_ids:
+            self._pow_checked[block_id] = None
+        while len(self._pow_checked) > self.POW_CHECKED_LIMIT:
+            self._pow_checked.popitem(last=False)
+
     def next_block_context(self) -> BlockContext:
         """Context for a block extending the current tip (miners build on this)."""
         return self._context(self.tip.header)
@@ -229,6 +305,9 @@ class ChainManager:
 
         parent = self.store.header(block.header.prev_id)
         if parent is None:
+            # Nothing to check it against yet, but it must at least carry the work it claims.
+            if block.header.target > self.params.pow_limit or not meets_target(block.header, self.params.pow):
+                return self._invalid(block_id, ValidationError("bad-pow"))
             self._hold_orphan(block)
             return SubmitResult(Outcome.ORPHAN, block_id)
         if parent.status == STATUS_INVALID:
@@ -244,6 +323,7 @@ class ChainManager:
                 self.median_time_past(parent.block_id),
                 self.expected_target(parent.header),
                 self.params,
+                check_pow=block_id not in self._pow_checked,
             )
             check_block(block, self.params)
         except ValidationError as error:
@@ -273,16 +353,23 @@ class ChainManager:
             raise ValidationError("fork-below-finality", f"history up to height {finalized} is final")
 
     def _hold_orphan(self, block: Block) -> None:
-        if len(self._orphans) >= self.MAX_ORPHANS:
-            del self._orphans[next(iter(self._orphans))]  # drop the oldest
+        while self._orphans and (len(self._orphans) >= self.MAX_ORPHANS
+                                 or self._orphan_bytes + block.size > self.MAX_ORPHAN_BYTES):
+            self._forget_orphan(next(iter(self._orphans)))  # drop the oldest
         self._orphans[block.block_id] = block
+        self._orphan_bytes += block.size
+
+    def _forget_orphan(self, block_id: bytes) -> Block:
+        block = self._orphans.pop(block_id)
+        self._orphan_bytes -= block.size
+        return block
 
     def _drop_orphans_of(self, block_id: bytes) -> None:
         doomed = [block_id]
         while doomed:
             parent_id = doomed.pop()
             for orphan_id in [o for o, b in self._orphans.items() if b.header.prev_id == parent_id]:
-                del self._orphans[orphan_id]
+                self._forget_orphan(orphan_id)
                 doomed.append(orphan_id)
 
     def _adopt_orphans(self, parent_id: bytes, result: SubmitResult) -> None:
@@ -292,7 +379,7 @@ class ChainManager:
             current = waiting.pop()
             children = [b for b in self._orphans.values() if b.header.prev_id == current]
             for child in children:
-                del self._orphans[child.block_id]
+                self._forget_orphan(child.block_id)
                 child_result = self._submit_one(child)
                 result.connected.extend(child_result.connected)
                 result.disconnected.extend(child_result.disconnected)

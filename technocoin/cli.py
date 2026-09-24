@@ -285,7 +285,8 @@ def cmd_node(args: argparse.Namespace, params: NetworkParams) -> int:
         text = _load(args, params).addresses[0].address if args.mine == "wallet" else args.mine
         miner = decode_address(text, params.address_prefix)
     run_node(params, base, host=args.host, port=args.port, miner=miner, workers=args.threads,
-             blocks=args.blocks, min_fee_per_byte=args.min_fee, peers=args.peer, public_url=args.public_url)
+             blocks=args.blocks, min_fee_per_byte=args.min_fee, peers=args.peer, public_url=args.public_url,
+             trusted=args.trust)
     return 0
 
 
@@ -388,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--peer", action="append", default=[], metavar="URL",
                       help="another node to connect to, e.g. ws://127.0.0.1:64188/v1/p2p (repeatable)")
     node.add_argument("--public-url", metavar="URL", help="how other nodes can reach this one (ws://host:port/v1/p2p)")
+    node.add_argument("--trust", action="append", default=[], metavar="IP",
+                      help="give this address full API access when listening publicly, e.g. a mining "
+                           "computer on your network (repeatable)")
     node.add_argument("--reset", action="store_true", help="devnet only: delete the chain and start a fresh devnet")
     node.add_argument("--reindex", action="store_true", help="rebuild the database from the block files first")
     node.add_argument("--file", help=argparse.SUPPRESS)  # lets _load() find the wallet the same way as `tc wallet`

@@ -2,12 +2,13 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from technocoin.core.block import Block, block_from_bytes
 from technocoin.core.params import REGTEST
 from technocoin.core.pow import meets_target, mine
 from technocoin.crypto.address import encode_address
-from technocoin.node.api import create_app
+from technocoin.node.api import ApiPolicy, create_app
 from technocoin.node.service import NodeService
 from technocoin.node.store import Store
 
@@ -137,3 +138,59 @@ def test_websocket_events(api):
 def test_interactive_docs_are_served(api):
     assert api.get("/docs").status_code == 200
     assert "/v1/address/{address}" in api.get("/openapi.json").json()["paths"]
+
+
+# --- public mode: what strangers get ---------------------------------------------------------
+# TestClient requests come from "testclient", which isn't this computer: a stranger.
+
+
+def public_api(**policy):
+    app = create_app(lambda: NodeService(PARAMS, Store(":memory:"), log=lambda line: None),
+                     policy=ApiPolicy(public=True, **policy))
+    return TestClient(app)
+
+
+def test_strangers_cannot_use_the_mining_endpoints():
+    with public_api() as api:
+        response = api.get("/v1/mining/template", params={"address": ALICE_TEXT})
+        assert response.status_code == 403 and response.json()["error"] == "local-only"
+        assert api.post("/v1/mining/submit", json={"hex": "00"}).status_code == 403
+        assert api.get("/v1/status").status_code == 200  # everything else is open
+    with public_api(trusted=frozenset({"testclient"})) as api:  # e.g. a mining computer on the network
+        mine_blocks(api, ALICE_TEXT, 1)
+
+
+def test_strangers_are_rate_limited():
+    with public_api(requests_per_second=1, burst=5) as api:
+        codes = [api.get("/v1/status").status_code for _ in range(8)]
+        assert codes[:5] == [200] * 5 and set(codes[5:]) == {429}
+        assert api.get("/v1/status").headers["Retry-After"] == "1"
+    with TestClient(create_app(lambda: NodeService(PARAMS, Store(":memory:"), log=lambda line: None))) as api:
+        assert {api.get("/v1/status").status_code for _ in range(300)} == {200}  # a private node isn't
+
+
+def test_strangers_get_shorter_lists(tmp_path):
+    def app(**policy):
+        return create_app(lambda: NodeService(PARAMS, Store(tmp_path / "chain.sqlite"), log=lambda line: None),
+                          policy=ApiPolicy(public=True, **policy))
+
+    with TestClient(app(trusted=frozenset({"testclient"}))) as api:
+        mine_blocks(api, ALICE_TEXT, 6)
+        assert len(api.get(f"/v1/address/{ALICE_TEXT}/history", params={"limit": 50}).json()) == 6
+    with TestClient(app(stranger_list_limit=2)) as api:  # the same node, seen by a stranger
+        assert len(api.get(f"/v1/address/{ALICE_TEXT}/history", params={"limit": 50}).json()) == 2
+
+
+def test_strangers_may_open_only_a_few_live_connections():
+    with public_api(websockets_per_host=2) as api:
+        with api.websocket_connect("/v1/ws") as first, api.websocket_connect("/v1/ws") as second:
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with api.websocket_connect("/v1/ws") as third:
+                    third.send_json({"subscribe": ["blocks"]})
+                    third.receive_json()  # only reached if the third connection was let in
+            assert refused.value.code == 1013
+            first.send_json({"subscribe": ["blocks", "mempool"]})
+            assert first.receive_json()["event"] == "subscribed"
+        with api.websocket_connect("/v1/ws") as again:  # closed ones don't count any more
+            again.send_json({"subscribe": ["blocks"]})
+            assert again.receive_json()["event"] == "subscribed"

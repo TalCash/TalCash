@@ -12,8 +12,9 @@ from ..core.block import Block
 from ..core.params import NetworkParams
 from ..miner.engine import Miner
 from ..paths import network_dir
-from .api import create_app
+from .api import ApiPolicy, create_app
 from .chain import Outcome
+from .limits import is_loopback
 from .p2p import MAX_MESSAGE_BYTES, P2PConfig
 from .service import NodeService, print_now
 
@@ -84,18 +85,23 @@ def run_node(
     min_fee_per_byte: int = 1,
     peers: list[str] | None = None,
     public_url: str | None = None,
+    trusted: list[str] | None = None,
     log: Callable[[str], None] = print_now,
 ) -> None:
     """Run until Ctrl+C (or until `blocks` blocks are mined).
 
     `peers` are nodes to stay connected to (ws://host:port/v1/p2p). `public_url` is how other
     nodes can reach this one; by default it's derived from host and port when those are specific.
+    Listening anywhere but this computer (e.g. --host 0.0.0.0) puts the API in public mode (see
+    api.py); `trusted` addresses still get full access.
     """
     port = params.default_port if port is None else port
     if public_url is None and host not in ("0.0.0.0", "::") and port != 0:
         public_url = f"ws://{host}:{port}/v1/p2p"
     p2p = P2PConfig(listen_url=public_url, connect=list(peers or []),
                     peers_file=network_dir(params.name, base) / "peers.json")
+    public = not is_loopback(host)
+    policy = ApiPolicy(public=public, trusted=frozenset(trusted or []))
     server: uvicorn.Server | None = None
 
     def stop() -> None:
@@ -107,6 +113,9 @@ def run_node(
         log(f"API on http://{host}:{port}/v1/status (interactive docs: http://{host}:{port}/docs)")
         if public_url:
             log(f"other nodes can connect to {public_url}")
+        if public:
+            log("public mode: other computers get a rate-limited API without mining"
+                + (f" (full access: {', '.join(sorted(policy.trusted))})" if policy.trusted else ""))
         return service
 
     background = [housekeeping]
@@ -114,7 +123,8 @@ def run_node(
         background.append(lambda service: mining_loop(
             service, miner, workers=workers, blocks=blocks, on_finished=stop if blocks is not None else None))
 
-    config = uvicorn.Config(create_app(open_service, background, p2p), host=host, port=port, log_level="warning",
-                            ws="websockets-sansio", ws_max_size=MAX_MESSAGE_BYTES, lifespan="on")
+    config = uvicorn.Config(create_app(open_service, background, p2p, policy), host=host, port=port,
+                            log_level="warning", ws="websockets-sansio", ws_max_size=MAX_MESSAGE_BYTES, lifespan="on",
+                            limit_concurrency=2000 if public else None)
     server = uvicorn.Server(config)
     server.run()

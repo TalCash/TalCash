@@ -27,7 +27,7 @@ tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
 
-Coming next: hardening, a public testnet, then launch.
+Coming next: a public testnet, a block explorer, then launch.
 
 ## Try it: a local devnet
 
@@ -111,6 +111,20 @@ use `wallet --node http://host:port ...` for another.
 `tc node` serves an HTTP + WebSocket API on the network's port (64187 on devnet), on this computer
 only unless you pass `--host`. Interactive documentation: http://127.0.0.1:64187/docs. The endpoints
 are listed in [docs/PROTOCOL.md](docs/PROTOCOL.md), section 15.
+
+With `--host 0.0.0.0` (so other machines' nodes can connect) the API goes into public mode: other
+computers get a rate-limited API without the mining endpoints. `--trust IP` gives one address full
+access, e.g. a separate mining computer on your network.
+
+## Safety against misbehaving peers
+
+- Headers first: a node checks every header of a chain (links, timestamps, difficulty, proof of
+  work) and only downloads the blocks of a chain that really has more work than its own.
+- Every peer has a message budget; a flooding peer is read more slowly instead of served faster.
+- A peer that sends anything an honest node never would (invalid blocks or headers, forged
+  payments, damaged day files, garbage) is disconnected and banned for an hour.
+- Everything that reads outside data is fuzz-tested (`tests/test_fuzz.py`; run it longer with
+  `TC_FUZZ_ROUNDS=100`).
 
 ## Development
 

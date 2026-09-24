@@ -25,17 +25,29 @@ class Subscription:
 
 class EventBus:
     def __init__(self) -> None:
-        self._subscriptions: set[Subscription] = set()
+        # Indexed by topic, so an event costs nothing for subscribers that don't want it.
+        self._by_topic: dict[str, set[Subscription]] = {}
 
     def subscribe(self) -> Subscription:
-        subscription = Subscription()
-        self._subscriptions.add(subscription)
-        return subscription
+        return Subscription()
+
+    def add_topics(self, subscription: Subscription, topics: list[str], limit: int) -> None:
+        """Add topics to a subscription, up to `limit` topics in total."""
+        for topic in topics:
+            if len(subscription.topics) >= limit:
+                break
+            subscription.topics.add(topic)
+            self._by_topic.setdefault(topic, set()).add(subscription)
 
     def unsubscribe(self, subscription: Subscription) -> None:
-        self._subscriptions.discard(subscription)
+        for topic in subscription.topics:
+            subscribers = self._by_topic.get(topic)
+            if subscribers is not None:
+                subscribers.discard(subscription)
+                if not subscribers:
+                    del self._by_topic[topic]
+        subscription.topics.clear()
 
     def publish(self, topic: str, message: dict) -> None:
-        for subscription in list(self._subscriptions):
-            if topic in subscription.topics:
-                subscription.deliver(message)
+        for subscription in list(self._by_topic.get(topic, ())):
+            subscription.deliver(message)

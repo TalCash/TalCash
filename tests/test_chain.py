@@ -12,10 +12,11 @@ import pytest
 
 from technocoin.core.amounts import COIN
 from technocoin.core.block import Block
+from technocoin.core.errors import ValidationError
 from technocoin.core.genesis import mine_genesis
 from technocoin.core.params import REGTEST
 from technocoin.core.pow import meets_target
-from technocoin.node.chain import ChainManager, Outcome
+from technocoin.node.chain import ChainManager, Outcome, all_meet_target
 from technocoin.node.store import STATUS_INVALID, Store
 
 from chainutil import TestChain, make_transfer, named_key
@@ -289,3 +290,80 @@ def test_database_from_another_network_is_refused(tmp_path):
                     genesis_nonce=other_genesis.header.nonce, genesis_id=other_genesis.block_id)
     with pytest.raises(RuntimeError, match="different network"):
         new_node(path, params=other)
+
+
+# --- headers first ------------------------------------------------------------------
+
+
+def failing_nonce(header):
+    """A nonce whose proof of work doesn't meet the header's target."""
+    return replace(header, nonce=next(n for n in range(10_000) if not meets_target(replace(header, nonce=n), PARAMS.pow)))
+
+
+def test_headers_are_checked_like_blocks_before_downloading_them():
+    ref = reference(8)
+    headers = [b.header for b in ref.blocks[1:]]
+    node = new_node()
+    start = node.header_tip(node.genesis.block_id)
+    tip, checked = node.check_headers(start, headers)
+    assert checked == headers and tip.header == headers[-1]
+    feed(node, ref.blocks[1:])
+    assert tip.chain_work == node.tip.chain_work  # the work the headers promise is what the blocks give
+
+    for broken, code in [
+        (replace(headers[3], target=headers[3].target - 1), "bad-target"),
+        (replace(headers[3], timestamp=headers[0].timestamp), "time-too-old"),
+        (replace(headers[3], height=99), "bad-height"),
+        (replace(headers[3], prev_id=headers[1].block_id), "bad-prev-id"),
+        (replace(headers[3], version=2), "bad-version"),
+    ]:
+        with pytest.raises(ValidationError, match=code):
+            new_node().check_headers(start, headers[:3] + [broken])
+
+    # Proof of work is checked separately (on all cores).
+    assert all_meet_target(headers, PARAMS.pow)
+    assert not all_meet_target(headers[:3] + [failing_nonce(headers[3])], PARAMS.pow)
+
+
+def test_headers_from_the_future_end_the_list_without_an_error():
+    ref = reference(8)
+    headers = [b.header for b in ref.blocks[1:]]
+    node = new_node(now=headers[4].timestamp - PARAMS.max_future_drift - 1)  # our clock: header 5 is too new
+    _, checked = node.check_headers(node.header_tip(node.genesis.block_id), headers)
+    assert checked == headers[:4]
+
+
+def test_a_branch_may_not_start_below_the_final_history():
+    ref = reference(30)
+    node = new_node()
+    feed(node, ref.blocks[1:])  # final up to height 20
+    node.check_branch_point(ref.blocks[20].block_id)
+    with pytest.raises(ValidationError, match="fork-below-finality"):
+        node.check_branch_point(ref.blocks[19].block_id)
+
+
+def test_blocks_whose_headers_were_checked_skip_the_second_proof_of_work_check(monkeypatch):
+    ref = reference(3)
+    node = new_node()
+    node.note_pow_checked([b.block_id for b in ref.blocks[1:]])
+    monkeypatch.setattr("technocoin.core.state.meets_target", lambda *a: pytest.fail("checked twice"))
+    assert feed(node, ref.blocks[1:])[-1].outcome is Outcome.NEW_TIP
+
+
+def test_an_orphan_must_carry_the_work_it_claims():
+    ref = reference(3)
+    node = new_node()
+    orphan = ref.blocks[3]  # the node doesn't have its parent
+    fake = Block(failing_nonce(orphan.header), orphan.transactions)
+    assert node.submit_block(fake).error.code == "bad-pow"
+    assert node.submit_block(orphan).outcome is Outcome.ORPHAN
+
+
+def test_waiting_orphans_are_limited_in_bytes(monkeypatch):
+    ref = reference(8)
+    monkeypatch.setattr(ChainManager, "MAX_ORPHAN_BYTES", 3 * ref.blocks[2].size + 10)
+    node = new_node()
+    for block in ref.blocks[2:]:
+        assert node.submit_block(block).outcome is Outcome.ORPHAN
+    assert len(node._orphans) == 3 and node._orphan_bytes <= ChainManager.MAX_ORPHAN_BYTES
+    assert list(node._orphans) == [b.block_id for b in ref.blocks[6:]]  # the oldest went first

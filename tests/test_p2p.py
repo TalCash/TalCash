@@ -6,8 +6,6 @@ import time
 from dataclasses import replace
 
 import pytest
-from websockets.exceptions import ConnectionClosed
-from websockets.sync.client import connect
 
 from technocoin.core.block import Block, block_from_bytes
 from technocoin.core.params import REGTEST
@@ -17,7 +15,7 @@ from technocoin.node import p2p
 from technocoin.node.network import join_devnet, load_params
 
 from chainutil import make_transfer, named_key
-from netutil import LocalNode, wait_until
+from netutil import LocalNode, assert_disconnected, raw_peer, wait_until
 
 PARAMS = replace(REGTEST, coinbase_maturity=3, finality_depth=50)
 ALICE, BOB, CAROL = named_key("alice"), named_key("bob"), named_key("carol")
@@ -114,21 +112,6 @@ def test_split_networks_rejoin_on_the_chain_with_more_work(nodes):
     assert a.balance(text(CAROL)) == b.balance(text(CAROL)) == "2.000000"
 
 
-def raw_peer(node: LocalNode):
-    """A hand-written peer connection, to send the node anything we like."""
-    socket = connect(node.p2p_url, max_size=p2p.MAX_MESSAGE_BYTES, open_timeout=5)
-    hello = json.loads(socket.recv(timeout=5))
-    assert hello["type"] == "hello"
-    return socket, hello
-
-
-def assert_disconnected(socket) -> None:
-    """The node must hang up on us (going silent isn't enough)."""
-    with pytest.raises(ConnectionClosed):
-        for _ in range(10):
-            socket.recv(timeout=10)  # it may send a message or two (e.g. get_peers) before hanging up
-
-
 def test_bad_peers_are_disconnected_and_the_node_carries_on(nodes):
     a = nodes("a")
     a.mine(text(ALICE), 2)
@@ -182,8 +165,8 @@ def test_a_damaged_chunk_gets_the_peer_dropped_and_another_peer_is_used(nodes, m
 
     real_download, calls = p2p.download_chunk, []
 
-    async def first_download_damaged(http_base, index):
-        data = await real_download(http_base, index)
+    async def first_download_damaged(http_base, index, max_bytes):
+        data = await real_download(http_base, index, max_bytes)
         calls.append(http_base)
         if len(calls) == 1:
             data = data[:-1] + bytes([data[-1] ^ 1])  # break the checksum

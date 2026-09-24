@@ -18,6 +18,7 @@ from .base58 import b58decode, b58encode
 ADDRESS_VERSION = 0
 PAYLOAD_SIZE = 21
 CHECKSUM_SIZE = 4
+MAX_BASE58_LENGTH = 40  # 25 bytes are at most 35 base58 characters
 
 # Payload that no key can ever produce: nobody can spend coins sent here.
 BURN_PAYLOAD = bytes(PAYLOAD_SIZE)
@@ -49,6 +50,8 @@ def decode_address(text: str, prefix: str) -> bytes:
     """Return the payload of a text address, or raise ValueError explaining why it is invalid."""
     if not text.startswith(prefix):
         raise ValueError(f"address must start with {prefix!r}")
+    if len(text) > len(prefix) + MAX_BASE58_LENGTH:
+        raise ValueError("address is too long")  # checked first: decoding base58 slows down quadratically
     raw = b58decode(text[len(prefix):])
     if len(raw) != PAYLOAD_SIZE + CHECKSUM_SIZE:
         raise ValueError("address has the wrong length")

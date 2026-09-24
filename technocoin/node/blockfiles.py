@@ -35,6 +35,9 @@ from ..core.hashing import merkle_root, sha256
 MAGIC = b"TCCHUNK1"
 SEGMENT_BLOCKS = 64
 _HEADER_BYTES = 8 + 1 + 4 + 8 + 4 + 32 + 4
+# 64 full blocks (1 MB each, the limit on every network) with their length fields. A segment that
+# would unpack to more is refused before it's unpacked any further (a "zip bomb" can't fill memory).
+MAX_SEGMENT_BYTES = SEGMENT_BLOCKS * (1_000_000 + 4)
 
 
 class ChunkError(ValueError):
@@ -70,7 +73,13 @@ def _pack_segment(blocks: list[bytes]) -> bytes:
 
 
 def _unpack_segment(data: bytes) -> list[bytes]:
-    raw, blocks, offset = zlib.decompress(data), [], 0
+    unpacker = zlib.decompressobj()
+    raw = unpacker.decompress(data, MAX_SEGMENT_BYTES)
+    if unpacker.unconsumed_tail:
+        raise zlib.error("segment unpacks to more than 64 full blocks")
+    if not unpacker.eof or unpacker.unused_data:
+        raise zlib.error("segment is cut short or has extra bytes")
+    blocks, offset = [], 0
     while offset < len(raw):
         length = int.from_bytes(raw[offset:offset + 4], "big")
         blocks.append(raw[offset + 4:offset + 4 + length])

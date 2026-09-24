@@ -3,7 +3,8 @@
 Nodes talk over WebSocket at /v1/p2p on the node's port, one JSON object per
 message, each with a "type". Blocks, headers and transactions travel as hex.
 
-  hello        first message both ways: protocol, network, genesis, node id, height, work, listen URL
+  hello        first message both ways: protocol, network, genesis, node id, height, work,
+               sealed chunks, listen URL
   inv          "I have these": block and/or transaction ids
   get_data     "send me these": block and/or transaction ids
   block, tx    the data itself
@@ -12,6 +13,8 @@ message, each with a "type". Blocks, headers and transactions travel as hex.
   headers      up to 2,000 headers after the first locator block the peer also has
   get_peers    ask for addresses of other nodes
   peers        up to 100 node URLs
+
+Unknown message types are ignored, so later versions can add messages.
 
 Spreading news: a new tip or accepted transfer is announced by id (inv) to every
 peer that isn't known to have it; peers fetch only what they lack, so nothing
@@ -22,15 +25,29 @@ a block whose parent we lack, we catch up from it. First, whole sealed days:
 if its hello says it has sealed chunks we don't, we download those chunk files
 over HTTP (GET /v1/chunks/{i} on the same port) and import each in one go
 (checked in a background thread, then applied in one database transaction).
-Then the rest block by block: headers after our locator, then those blocks 64
-at a time, in order; the chain manager switches branches if theirs has more
-work. One peer at a time; a peer that stalls for 30 seconds is dropped and
-another is tried. A chunk that doesn't fit our chain (we're on a different
-branch) or can't be downloaded just means falling back to block by block.
+Then the rest, headers first: we ask for headers after our locator and check
+every one of them (links, height, timestamps, difficulty, and proof of work on
+all cores) before downloading any block. Only a chain whose checked headers add
+up to more work than ours gets downloaded, 64 blocks at a time, in order; the
+chain manager switches branches once the downloaded blocks have more work. One
+peer at a time; a peer that stalls for 30 seconds is dropped and another is
+tried. A chunk that doesn't fit our chain (we're on a different branch) or
+can't be downloaded just means falling back to headers.
 
-Misbehaviour (malformed messages, invalid blocks, damaged chunk files, wrong
-network) gets the peer disconnected. Harmless disagreements (a clock slightly
-off, a fork deeper than our finality) don't.
+Limits: every message costs a peer some of its budget (500 units a second,
+saving up to 5,000; asking for headers or blocks costs more than announcing).
+A peer over budget isn't disconnected, just read more slowly: we stop reading
+from it until it's back within budget, so flooding only slows the flooder down.
+Blocks a peer asks for are read from disk one at a time as they're sent, so
+requests can't fill our memory. At most 4 inbound connections per IP address
+(not counting this computer).
+
+Misbehaviour: anything an honest node never does (malformed messages, invalid
+blocks, headers or transfers, damaged chunk files) gets the peer disconnected
+and banned for an hour, by node id and by IP address (a node on this computer
+only by node id). Harmless disagreements (a clock slightly off, a fork deeper
+than our finality, a transfer that's only invalid because of the order things
+arrived in) don't count.
 
 Addresses of nodes we managed to connect to are saved (peers.json) so a
 restarted node finds the network again without being told.
@@ -41,10 +58,13 @@ import contextlib
 import json
 import os
 import time
+import traceback
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -56,8 +76,10 @@ from ..core.block import Block, block_from_bytes, header_from_bytes
 from ..core.errors import DecodeError, ValidationError
 from ..core.tx import Transfer, transaction_from_bytes
 from .blockfiles import ChunkError
-from .chain import Outcome, check_chunk_file
+from .chain import HeaderTip, Outcome, all_meet_target, check_chunk_file
+from .limits import TokenBucket, is_loopback
 from .service import NodeService
+from .store import STATUS_INVALID, STATUS_VALID
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024  # a full 1 MB block is 2 MB of hex
@@ -72,15 +94,29 @@ SEND_QUEUE_LIMIT = 5000
 KNOWN_LIMIT = 20_000
 CHECK_INTERVAL = 2
 SAVE_PEERS_INTERVAL = 30
-MAX_CHUNK_FILE_BYTES = 256 * 1024 * 1024
-BAD_PEER_TIMEOUT = 600  # don't redial a peer that sent a damaged chunk for 10 minutes
+BAN_SECONDS = 3600
+MAX_INBOUND_PER_HOST = 4
+MAX_PENDING_HEADERS = 50_000  # checked headers waiting for their blocks, per sync
+
+# Each peer's message budget (see "Limits" above). Messages not listed cost 1.
+MESSAGE_RATE = 500
+MESSAGE_BURST = 5000
+MESSAGE_COSTS = {"get_headers": 250, "get_peers": 50, "peers": 5, "block": 5, "tx": 2}
 
 # Block rejections that don't mean the peer is misbehaving.
 _HARMLESS_BLOCK_ERRORS = {"time-too-new", "fork-below-finality"}
+# Transfer rejections that do: no honest node relays a transfer that breaks these rules,
+# because they don't depend on balances or on what else is waiting.
+_INVALID_TX_ERRORS = {"wrong-network", "memo-too-large", "bad-output-count", "bad-address", "bad-amount",
+                      "bad-fee", "amount-overflow", "bad-signature", "not-a-transfer"}
 
 
 class ProtocolError(Exception):
-    """The peer broke the protocol; disconnect it."""
+    """The peer broke the protocol: disconnect it, and with `ban`, refuse it for an hour."""
+
+    def __init__(self, reason: str, *, ban: bool = True) -> None:
+        super().__init__(reason)
+        self.ban = ban
 
 
 def _http_base(ws_url: str | None) -> str | None:
@@ -90,8 +126,20 @@ def _http_base(ws_url: str | None) -> str | None:
     return "http" + ws_url[2:].split("/v1/")[0]
 
 
-async def download_chunk(http_base: str, index: int) -> bytes | None:
-    """A peer's sealed chunk file, or None if it doesn't have it. Refuses absurdly large files."""
+def _url_host(url: str | None) -> str | None:
+    try:
+        return urlsplit(url).hostname if url else None
+    except ValueError:
+        return None
+
+
+def max_chunk_file_bytes(params) -> int:
+    """The largest a chunk file can honestly be: a day of full blocks plus the file's own overhead."""
+    return params.chunk_size * (params.max_block_size + 64) + 1_000_000
+
+
+async def download_chunk(http_base: str, index: int, max_bytes: int) -> bytes | None:
+    """A peer's sealed chunk file, or None if it doesn't have it. Refuses files over `max_bytes`."""
     async with httpx.AsyncClient(timeout=60) as client:
         async with client.stream("GET", f"{http_base}/v1/chunks/{index}") as response:
             if response.status_code != 200:
@@ -99,7 +147,7 @@ async def download_chunk(http_base: str, index: int) -> bytes | None:
             parts, total = [], 0
             async for part in response.aiter_bytes():
                 total += len(part)
-                if total > MAX_CHUNK_FILE_BYTES:
+                if total > max_bytes:
                     raise ProtocolError("chunk file too large")
                 parts.append(part)
             return b"".join(parts)
@@ -132,11 +180,13 @@ class P2PConfig:
 
 
 class Peer:
-    def __init__(self, send_text: Callable, recv_text: Callable, close: Callable, *, outbound: bool, label: str):
+    def __init__(self, send_text: Callable, recv_text: Callable, close: Callable, *, outbound: bool, label: str,
+                 host: str | None = None):
         self._send_text, self.recv_text, self._close = send_text, recv_text, close
         self.outbound = outbound
         self.label = label
         self.url: str | None = label if outbound else None
+        self.host = host  # IP address (or name, for outbound) for bans and per-address limits
         self.ready = False
         self.node_id = ""
         self.height = 0
@@ -145,28 +195,43 @@ class Peer:
         self.http_url: str | None = None  # the peer's API (for chunk downloads)
         self.known_blocks = _Recent()
         self.known_txs = _Recent()
-        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self.budget = TokenBucket(MESSAGE_RATE, MESSAGE_BURST)
+        # Messages to send: text, or a function making the text when its turn comes (big blocks
+        # are only read from disk then, so a long request list can't fill our memory).
+        self.queue: asyncio.Queue[str | Callable[[], str | None] | None] = asyncio.Queue()
         self.closed = False
+        self.drop_reason: str | None = None
         # catching up from this peer
-        self.waiting: deque[bytes] = deque()  # block ids still to request
+        self.sync_round = 0  # bumped at every new sync, so late results of an old one are ignored
+        self.header_tip: HeaderTip | None = None  # end of the peer's chain as far as we've checked its headers
+        self.waiting: deque[bytes] = deque()  # blocks (with checked headers) still to request
         self.in_flight: set[bytes] = set()  # requested, not yet received
         self.more_headers = False
-        self.last_header: bytes | None = None
+        self.awaiting_headers = False  # asked for headers; nothing else may arrive as "headers"
+        self.checking_headers = False
         self.last_progress = time.monotonic()
 
     def send(self, message: dict) -> None:
+        self._put(json.dumps(message, separators=(",", ":")))
+
+    def send_later(self, make: Callable[[], str | None]) -> None:
+        self._put(make)
+
+    def _put(self, item) -> None:
         if self.closed:
             return
         if self.queue.qsize() >= SEND_QUEUE_LIMIT:
             self.closed = True  # too slow to keep up; the writer will close it
             self.queue.put_nowait(None)
             return
-        self.queue.put_nowait(json.dumps(message, separators=(",", ":")))
+        self.queue.put_nowait(item)
 
     async def write_loop(self) -> None:
         try:
-            while (text := await self.queue.get()) is not None:
-                await self._send_text(text)
+            while (item := await self.queue.get()) is not None:
+                text = item() if callable(item) else item
+                if text is not None:
+                    await self._send_text(text)
         except Exception:
             pass  # the connection went away; the reader notices too
         await self.close()  # also reached when the queue overflowed: the reader then stops
@@ -200,8 +265,30 @@ def _hex(message: dict, key: str) -> bytes:
         raise ProtocolError(f"bad hex in {key}") from None
 
 
+def _count(message: dict, key: str) -> int:
+    value = message.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 2**63:
+        raise ProtocolError(f"bad {key}")
+    return value
+
+
 def _valid_url(url: object) -> bool:
     return isinstance(url, str) and url.startswith(("ws://", "wss://")) and len(url) <= 200
+
+
+def _length(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _cost(message: dict) -> float:
+    """How much of a peer's budget a message uses."""
+    kind = message["type"]
+    cost = MESSAGE_COSTS.get(kind, 1)
+    if kind == "get_data":  # serving blocks is the expensive part
+        cost += 2 * _length(message.get("blocks")) + _length(message.get("txs")) / 10
+    elif kind == "inv":
+        cost += (_length(message.get("blocks")) + _length(message.get("txs"))) / 100
+    return cost
 
 
 class PeerManager:
@@ -218,6 +305,7 @@ class PeerManager:
         self.failures: dict[str, int] = {}
         self.sync_peer: Peer | None = None
         self.banned: dict[str, float] = {}  # node id -> refused until (monotonic time)
+        self.banned_hosts: dict[str, float] = {}  # IP address -> refused until (never this computer)
         self.rejected_txs = _Recent()
         self._tasks: set[asyncio.Task] = set()
         if config.listen_url:
@@ -272,6 +360,7 @@ class PeerManager:
         last_save = time.monotonic()
         try:
             while True:
+                self._forget_expired_bans()
                 self._dial_more()
                 self._check_stall()
                 if time.monotonic() - last_save > SAVE_PEERS_INTERVAL:
@@ -299,7 +388,8 @@ class PeerManager:
             if outbound >= self.config.target_outbound:
                 break
             if (url in connected or url in self.dialing or url in self.self_urls
-                    or self.url_node.get(url) in connected_nodes or self.retry_at.get(url, 0) > now):
+                    or self.url_node.get(url) in connected_nodes or self.retry_at.get(url, 0) > now
+                    or self.banned_hosts.get(_url_host(url) or "", 0) > now):
                 continue
             self.dialing.add(url)
             outbound += 1
@@ -310,7 +400,7 @@ class PeerManager:
             try:
                 connection = await ws_connect(url, max_size=MAX_MESSAGE_BYTES, open_timeout=5,
                                               ping_interval=20, ping_timeout=20)
-            except (OSError, InvalidHandshake, InvalidURI, TimeoutError) as error:
+            except (OSError, InvalidHandshake, InvalidURI, TimeoutError, ValueError) as error:
                 failures = self.failures.get(url, 0) + 1
                 self.failures[url] = failures
                 self.retry_at[url] = time.monotonic() + min(60, 2**failures)
@@ -327,18 +417,33 @@ class PeerManager:
                     raise ProtocolError("binary message")
                 return message
 
-            peer = Peer(connection.send, recv_text, connection.close, outbound=True, label=url)
+            remote = connection.remote_address
+            host = remote[0] if isinstance(remote, tuple) and remote else _url_host(url)
+            peer = Peer(connection.send, recv_text, connection.close, outbound=True, label=url, host=host)
         finally:
             self.dialing.discard(url)
         await self._serve(peer)
 
+    def inbound_refusal(self, host: str | None) -> int | None:
+        """Why an incoming connection from `host` must be refused (a WebSocket close code), or None."""
+        inbound = [p for p in self.peers if not p.outbound]
+        if len(inbound) >= self.config.max_inbound:
+            return 1013  # try again later
+        if host and self.banned_hosts.get(host, 0) > time.monotonic():
+            return 1008  # policy violation
+        if host and not is_loopback(host) and sum(p.host == host for p in inbound) >= MAX_INBOUND_PER_HOST:
+            return 1013
+        return None
+
     async def accept(self, socket: WebSocket) -> None:
         """An incoming connection (called by the /v1/p2p route)."""
-        if sum(1 for p in self.peers if not p.outbound) >= self.config.max_inbound:
-            await socket.close(code=1013)  # try again later
+        client = socket.client
+        host = client.host if client else None
+        refusal = self.inbound_refusal(host)
+        if refusal is not None:
+            await socket.close(code=refusal)
             return
         await socket.accept()
-        client = socket.client
         label = f"{client.host}:{client.port}" if client else "inbound"
 
         async def recv_text() -> str:
@@ -349,7 +454,7 @@ class PeerManager:
                 raise ProtocolError("binary message")
             return message["text"]
 
-        await self._serve(Peer(socket.send_text, recv_text, socket.close, outbound=False, label=label))
+        await self._serve(Peer(socket.send_text, recv_text, socket.close, outbound=False, label=label, host=host))
 
     async def _serve(self, peer: Peer) -> None:
         self.peers.add(peer)
@@ -359,18 +464,31 @@ class PeerManager:
             peer.send(self._hello())
             self._handle_hello(peer, self._parse(await asyncio.wait_for(peer.recv_text(), HELLO_TIMEOUT)))
             while not peer.closed:
-                self._handle(peer, self._parse(await peer.recv_text()))
+                message = self._parse(await peer.recv_text())
+                wait = peer.budget.take(_cost(message))
+                if wait:
+                    await asyncio.sleep(wait)  # over budget: we stop reading from it meanwhile
+                if not peer.closed:
+                    self._handle(peer, message)
         except ProtocolError as error:
-            reason = f"dropped: {error}"
+            if error.ban:
+                self._ban(peer)
+                reason = f"banned for {BAN_SECONDS // 60} minutes: {error}"
+            else:
+                reason = f"dropped: {error}"
         except TimeoutError:
             reason = "dropped: no hello"
         except (ConnectionClosed, WebSocketDisconnect, OSError, RuntimeError):
             pass
+        except Exception as error:  # a bug on our side: report it, drop the peer, keep running
+            reason = f"dropped after an internal error ({error!r})"
+            self.service.log("".join(traceback.format_exception(error)))
         finally:
             writer.cancel()
             self.peers.discard(peer)
             await peer.close()
-            if peer.ready:
+            reason = peer.drop_reason or reason
+            if peer.ready or reason.startswith("banned"):
                 self.log(f"{peer.label} {reason}")
             if self.sync_peer is peer:
                 self.sync_peer = None
@@ -379,11 +497,41 @@ class PeerManager:
     def _parse(self, text: str) -> dict:
         try:
             message = json.loads(text)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             raise ProtocolError("not JSON") from None
         if not isinstance(message, dict) or not isinstance(message.get("type"), str):
             raise ProtocolError("message without a type")
         return message
+
+    # --- misbehaviour -----------------------------------------------------------
+
+    def _ban(self, peer: Peer) -> None:
+        until = time.monotonic() + BAN_SECONDS
+        if peer.node_id:
+            self.banned[peer.node_id] = until  # refused when it connects to us, whatever its address
+        if peer.url:
+            self.retry_at[peer.url] = until
+        if peer.host and not is_loopback(peer.host):
+            self.banned_hosts[peer.host] = until  # new node ids from the same address don't help it
+        peer.work = 0
+
+    def _drop(self, peer: Peer, reason: str, *, ban: bool) -> None:
+        """Disconnect a peer from outside its reader (e.g. after a background check failed)."""
+        if ban:
+            self._ban(peer)
+        peer.drop_reason = f"banned for {BAN_SECONDS // 60} minutes: {reason}" if ban else f"dropped: {reason}"
+        peer.work = 0
+        peer.closed = True  # at once: nothing more gets sent to it or taken from it
+        if self.sync_peer is peer:
+            self.sync_peer = None
+        self._spawn(peer.close())
+        self._maybe_sync()
+
+    def _forget_expired_bans(self) -> None:
+        now = time.monotonic()
+        for table in (self.banned, self.banned_hosts):
+            for key in [key for key, until in table.items() if until <= now]:
+                del table[key]
 
     # --- handshake ----------------------------------------------------------
 
@@ -404,14 +552,14 @@ class PeerManager:
 
     def _handle_hello(self, peer: Peer, message: dict) -> None:
         if message.get("type") != "hello":
-            raise ProtocolError("expected hello")
+            raise ProtocolError("expected hello", ban=False)
         if message.get("protocol") != PROTOCOL_VERSION:
-            raise ProtocolError(f"unsupported protocol {message.get('protocol')!r}")
+            raise ProtocolError(f"unsupported protocol {str(message.get('protocol'))[:20]!r}", ban=False)
         if message.get("network") != self.service.params.name or \
                 message.get("genesis") != self.service.chain.genesis.block_id.hex():
-            raise ProtocolError("different network")
+            raise ProtocolError("different network", ban=False)
         node_id = message.get("node_id")
-        if not isinstance(node_id, str) or not node_id:
+        if not isinstance(node_id, str) or not 1 <= len(node_id) <= 64:
             raise ProtocolError("missing node id")
         if node_id == self.node_id:
             if peer.url:
@@ -419,23 +567,26 @@ class PeerManager:
             peer.closed = True  # connected to ourselves
             return
         if self.banned.get(node_id, 0) > time.monotonic():
-            raise ProtocolError("temporarily banned for misbehaving")
+            raise ProtocolError("banned for misbehaving earlier", ban=False)
+        height, chunks = _count(message, "height"), _count(message, "chunks")
+        work = message.get("work", "0")
+        try:
+            if not isinstance(work, str) or len(work) > 80:
+                raise ValueError
+            work = int(work, 16)
+        except ValueError:
+            raise ProtocolError("bad work") from None
         if peer.url:
             self.url_node[peer.url] = node_id
-        if _valid_url(message.get("listen")):
-            self.url_node[message["listen"]] = node_id
+        listen = message.get("listen") if _valid_url(message.get("listen")) else None
+        if listen:
+            self.url_node[listen] = node_id
         if any(p.node_id == node_id for p in self.ready_peers):
             peer.closed = True  # already connected to this node
             return
-        try:
-            peer.height = int(message.get("height", 0))
-            peer.work = int(message.get("work", "0"), 16)
-            peer.chunks = max(0, int(message.get("chunks", 0)))
-        except (TypeError, ValueError):
-            raise ProtocolError("bad height, work or chunks") from None
+        peer.height, peer.work, peer.chunks = height, work, chunks
         peer.node_id = node_id
         peer.ready = True
-        listen = message.get("listen") if _valid_url(message.get("listen")) else None
         peer.http_url = _http_base(peer.url if peer.outbound else listen)
         if peer.outbound:
             self._remember(peer.url)
@@ -444,7 +595,7 @@ class PeerManager:
         self.log(f"connected to {peer.label} ({'outbound' if peer.outbound else 'inbound'}, height {peer.height})")
 
         peer.send({"type": "get_peers"})
-        txids = [e.tx.txid.hex() for e in self.service.mempool.entries()]
+        txids = [e.tx.txid.hex() for e in self.service.mempool.iter_entries()]
         for start in range(0, len(txids), MAX_INV):
             peer.send({"type": "inv", "txs": txids[start:start + MAX_INV]})
         self._maybe_sync()
@@ -456,7 +607,6 @@ class PeerManager:
     # --- messages -------------------------------------------------------------
 
     def _handle(self, peer: Peer, message: dict) -> None:
-        kind = message["type"]
         handler = {
             "inv": self._on_inv,
             "get_data": self._on_get_data,
@@ -467,10 +617,9 @@ class PeerManager:
             "headers": self._on_headers,
             "get_peers": self._on_get_peers,
             "peers": self._on_peers,
-        }.get(kind)
-        if handler is None:
-            raise ProtocolError(f"unknown message {kind!r}")
-        handler(peer, message)
+        }.get(message["type"])
+        if handler is not None:  # unknown types are ignored (see the module docstring)
+            handler(peer, message)
 
     def _on_inv(self, peer: Peer, message: dict) -> None:
         blocks, txs = _ids(message, "blocks", MAX_INV), _ids(message, "txs", MAX_INV)
@@ -486,14 +635,15 @@ class PeerManager:
             peer.send({"type": "get_data", "blocks": want_blocks, "txs": want_txs})
 
     def _on_get_data(self, peer: Peer, message: dict) -> None:
+        store = self.service.store
         missing_blocks, missing_txs = [], []
         for block_id in _ids(message, "blocks", MAX_INV):
-            block = self.service.store.block(block_id)
-            if block is None:
-                missing_blocks.append(block_id.hex())
+            stored = store.header(block_id)
+            if stored is None or stored.status != STATUS_VALID:
+                missing_blocks.append(block_id.hex())  # never pass on a block we haven't fully checked
             else:
                 peer.known_blocks.add(block_id)
-                peer.send({"type": "block", "hex": block.serialize().hex()})
+                peer.send_later(partial(self._block_message, block_id))
         for txid in _ids(message, "txs", MAX_INV):
             entry = self.service.mempool.get(txid)
             if entry is None:
@@ -503,6 +653,10 @@ class PeerManager:
                 peer.send({"type": "tx", "hex": entry.tx.serialize().hex()})
         if missing_blocks or missing_txs:
             peer.send({"type": "not_found", "blocks": missing_blocks, "txs": missing_txs})
+
+    def _block_message(self, block_id: bytes) -> str | None:
+        data = self.service.store.block_bytes(block_id)
+        return None if data is None else json.dumps({"type": "block", "hex": data.hex()}, separators=(",", ":"))
 
     def _on_block(self, peer: Peer, message: dict) -> None:
         data = _hex(message, "hex")
@@ -514,16 +668,21 @@ class PeerManager:
             raise ProtocolError(f"unreadable block: {error}") from None
         block_id = block.block_id
         peer.known_blocks.add(block_id)
-        peer.height = max(peer.height, block.height)
         syncing = block_id in peer.in_flight
+        if not syncing and self.service.store.header(block.header.prev_id) is None:
+            # We lack its parent: the peer is ahead of us. Catch up from it, headers first,
+            # instead of holding on to a block we can't check yet.
+            peer.work = max(peer.work, self.service.chain.tip.chain_work + 1)
+            if self.sync_peer is None:
+                self._start_sync(peer)
+            return
+        peer.height = max(peer.height, block.height)
         result = self.service.submit_block(block, source=f"from {peer.label}", origin=peer, quiet=syncing)
         if result.outcome is Outcome.INVALID:
             if result.error and result.error.code in _HARMLESS_BLOCK_ERRORS:
                 peer.work = 0  # don't try to sync from it
             else:
                 raise ProtocolError(f"sent an invalid block ({result.error.code if result.error else '?'})")
-        elif result.outcome is Outcome.ORPHAN and self.sync_peer is None:
-            self._start_sync(peer)  # we're missing its parent: catch up from this peer
         if syncing:
             peer.in_flight.discard(block_id)
             peer.last_progress = time.monotonic()
@@ -539,13 +698,15 @@ class PeerManager:
             return
         try:
             self.service.submit_transaction(tx, origin=peer)
-        except ValidationError:
+        except ValidationError as error:
+            if error.code in _INVALID_TX_ERRORS:
+                raise ProtocolError(f"sent an invalid transfer ({error.code})") from None
             self.rejected_txs.add(tx.txid)  # already mined, conflicting, fee too low... not the peer's fault
 
     def _on_not_found(self, peer: Peer, message: dict) -> None:
         for block_id in _ids(message, "blocks", MAX_INV):
             if block_id in peer.in_flight:
-                raise ProtocolError("announced a block it doesn't have")
+                raise ProtocolError("didn't send a block it announced", ban=False)
 
     def _on_get_headers(self, peer: Peer, message: dict) -> None:
         locator = _ids(message, "locator", MAX_LOCATOR)
@@ -578,19 +739,40 @@ class PeerManager:
 
     def _start_sync(self, peer: Peer) -> None:
         self.sync_peer = peer
+        peer.sync_round += 1
+        peer.header_tip, peer.more_headers = None, False
+        peer.awaiting_headers = peer.checking_headers = False
+        peer.waiting.clear()
+        peer.in_flight.clear()
         peer.last_progress = time.monotonic()
         self.log(f"catching up from {peer.label} (our height {self.service.chain.tip_height})")
         if peer.http_url and peer.chunks > self.service.store.sealed_chunks():
-            self._spawn(self._sync_chunks(peer))  # whole days first, then the rest block by block
+            self._spawn(self._sync_chunks(peer))  # whole days first, then the rest headers first
         else:
             self._request_headers(peer)
 
+    def _end_sync(self, peer: Peer, *, useless: bool = False) -> None:
+        tip = self.service.chain.tip
+        if not useless:
+            self.log(f"caught up with {peer.label} at height {tip.height}")
+        peer.work = 0 if useless else min(peer.work, tip.chain_work)
+        peer.header_tip, peer.more_headers = None, False
+        peer.waiting.clear()
+        peer.in_flight.clear()
+        self.sync_peer = None
+        self._maybe_sync()
+
     def _request_headers(self, peer: Peer) -> None:
-        peer.send({"type": "get_headers", "locator": [i.hex() for i in self.service.chain.locator()]})
+        locator = self.service.chain.locator()
+        if peer.header_tip is not None:  # continue after the headers we've checked already
+            locator = [peer.header_tip.header.block_id] + locator[:MAX_LOCATOR - 1]
+        peer.awaiting_headers = True
+        peer.send({"type": "get_headers", "locator": [i.hex() for i in locator]})
 
     async def _sync_chunks(self, peer: Peer) -> None:
         """Download and import the peer's sealed chunks we don't have yet."""
         loop = asyncio.get_running_loop()
+        params = self.service.params
         try:
             while peer is self.sync_peer and not peer.closed:
                 index = self.service.store.sealed_chunks()
@@ -598,46 +780,35 @@ class PeerManager:
                     break
                 peer.last_progress = time.monotonic()
                 try:
-                    data = await download_chunk(peer.http_url, index)
-                except (httpx.HTTPError, ProtocolError) as error:
+                    data = await download_chunk(peer.http_url, index, max_chunk_file_bytes(params))
+                except (httpx.HTTPError, httpx.InvalidURL, ProtocolError) as error:
                     self.log(f"couldn't download chunk {index} from {peer.label} ({error}); going block by block")
                     break
                 if data is None:
                     break
                 try:
-                    checked = await loop.run_in_executor(None, check_chunk_file, data, self.service.params)
+                    checked = await loop.run_in_executor(None, check_chunk_file, data, params)
                     self.service.import_chunk(checked, origin=peer)
                 except ValidationError as error:
                     if error.code == "chunk-not-next":
                         break  # our chain differs from theirs here: go block by block
-                    self._drop_bad_peer(peer, f"sent an invalid chunk {index} ({error.code})")
+                    self._drop(peer, f"sent an invalid chunk {index} ({error.code})", ban=True)
                     return
                 except ChunkError as error:
-                    self._drop_bad_peer(peer, f"sent a damaged chunk {index} ({error})")
+                    self._drop(peer, f"sent a damaged chunk {index} ({error})", ban=True)
                     return
                 peer.last_progress = time.monotonic()
         finally:
             if peer is self.sync_peer and not peer.closed:
                 self._request_headers(peer)
 
-    def _drop_bad_peer(self, peer: Peer, reason: str) -> None:
-        self.log(f"{peer.label} {reason}; disconnecting")
-        until = time.monotonic() + BAD_PEER_TIMEOUT
-        if peer.url:
-            self.retry_at[peer.url] = until
-        self.banned[peer.node_id] = until  # also refuse it when it connects to us
-        peer.work = 0
-        if self.sync_peer is peer:
-            self.sync_peer = None
-        self._spawn(peer.close())
-        self._maybe_sync()
-
     def _on_headers(self, peer: Peer, message: dict) -> None:
         values = message.get("headers", [])
         if not isinstance(values, list) or len(values) > MAX_HEADERS:
             raise ProtocolError("bad headers list")
-        if peer is not self.sync_peer:
-            return  # we didn't ask
+        if peer is not self.sync_peer or not peer.awaiting_headers:
+            return  # we didn't ask (checking headers is expensive, so only one answer per question)
+        peer.awaiting_headers = False
         try:
             headers = [header_from_bytes(bytes.fromhex(v)) for v in values]
         except (TypeError, ValueError, DecodeError):
@@ -645,38 +816,101 @@ class PeerManager:
         for earlier, later in zip(headers, headers[1:]):
             if later.prev_id != earlier.block_id:
                 raise ProtocolError("headers don't form a chain")
-        peer.last_progress = time.monotonic()
-        peer.more_headers = len(headers) == MAX_HEADERS
-        peer.last_header = headers[-1].block_id if headers else None
-        store = self.service.store
-        peer.waiting.extend(h.block_id for h in headers if store.header(h.block_id) is None)
+        peer.checking_headers = True
+        self._spawn(self._check_headers(peer, headers, peer.sync_round))
+
+    async def _check_headers(self, peer: Peer, headers: list, sync_round: int) -> None:
+        """Check a batch of headers completely (proof of work on all cores, in the background)
+        before any of their blocks gets downloaded."""
+        chain, store = self.service.chain, self.service.store
+        try:
+            known = 0  # headers we have already form a prefix (a stored block's parent is stored too)
+            for header in headers:
+                stored = store.header(header.block_id)
+                if stored is None:
+                    break
+                if stored.status == STATUS_INVALID:
+                    raise ProtocolError("sent headers of an invalid block")
+                known += 1
+            new = headers[known:]
+            if known:
+                anchor = chain.header_tip(headers[known - 1].block_id)
+            elif headers and peer.header_tip is not None and headers[0].prev_id == peer.header_tip.header.block_id:
+                anchor = peer.header_tip
+            elif headers:
+                anchor = chain.header_tip(headers[0].prev_id)
+            else:
+                anchor = peer.header_tip
+            if headers and anchor is None:
+                # They don't connect to anything we know (the peer's chain changed under us?):
+                # start over from our own chain. Not progress, so a peer doing it forever stalls out.
+                if peer.sync_round == sync_round and peer is self.sync_peer:
+                    peer.header_tip = None
+                    peer.waiting.clear()
+                    self._request_headers(peer)
+                return
+            checked = []
+            if new:
+                if anchor is not peer.header_tip:
+                    chain.check_branch_point(anchor.header.block_id)
+                anchor, checked = chain.check_headers(anchor, new)
+                if checked:
+                    loop = asyncio.get_running_loop()
+                    if not await loop.run_in_executor(None, all_meet_target, checked, self.service.params.pow):
+                        raise ProtocolError("sent headers with invalid proof of work")
+                    chain.note_pow_checked(h.block_id for h in checked)
+        except ValidationError as error:
+            if error.code == "fork-below-finality":
+                self.log(f"{peer.label} is on a branch that split off below our final history; not following it")
+                if peer is self.sync_peer:
+                    self._end_sync(peer, useless=True)
+            else:
+                self._drop(peer, f"sent invalid headers ({error.code})", ban=True)
+            return
+        except ProtocolError as error:
+            self._drop(peer, str(error), ban=error.ban)
+            return
+        except Exception as error:  # a bug on our side
+            self.service.log("".join(traceback.format_exception(error)))
+            self._drop(peer, f"internal error while checking its headers ({error!r})", ban=False)
+            return
+        finally:
+            if peer.sync_round == sync_round:  # a newer catch-up with this peer has its own check
+                peer.checking_headers = False
+        if peer is not self.sync_peer or peer.closed or peer.sync_round != sync_round:
+            return
+        peer.header_tip = anchor
+        peer.waiting.extend(h.block_id for h in checked)
+        peer.more_headers = len(headers) == MAX_HEADERS and len(checked) == len(new)
+        if len(checked) < len(new):
+            peer.work = 0  # the rest is too far ahead of our clock; don't come straight back for it
+        if checked or known:
+            peer.last_progress = time.monotonic()
         self._continue_sync(peer)
 
     def _continue_sync(self, peer: Peer) -> None:
-        if peer is not self.sync_peer or peer.in_flight:
+        if peer is not self.sync_peer or peer.in_flight or peer.awaiting_headers or peer.checking_headers:
             return
-        if peer.waiting:
+        store = self.service.store
+        while peer.waiting and store.header(peer.waiting[0]) is not None:
+            peer.waiting.popleft()  # arrived meanwhile (e.g. announced by another peer)
+        ours = self.service.chain.tip.chain_work
+        better = peer.header_tip is not None and peer.header_tip.chain_work > ours
+        if peer.waiting and better:
             batch = [peer.waiting.popleft() for _ in range(min(BLOCKS_PER_REQUEST, len(peer.waiting)))]
             peer.in_flight.update(batch)
             peer.send({"type": "get_data", "blocks": [b.hex() for b in batch], "txs": []})
-        elif peer.more_headers and peer.last_header is not None:
-            locator = [peer.last_header] + self.service.chain.locator()[:MAX_LOCATOR - 1]
-            peer.send({"type": "get_headers", "locator": [i.hex() for i in locator]})
+        elif peer.more_headers and len(peer.waiting) < MAX_PENDING_HEADERS:
+            self._request_headers(peer)
         else:
-            tip = self.service.chain.tip
-            self.log(f"caught up with {peer.label} at height {tip.height}")
-            peer.work = min(peer.work, tip.chain_work)
-            self.sync_peer = None
-            self._maybe_sync()
+            if peer.waiting:
+                self.log(f"{peer.label}'s chain has no more work than ours; not downloading it")
+            self._end_sync(peer)
 
     def _check_stall(self) -> None:
         peer = self.sync_peer
         if peer is not None and time.monotonic() - peer.last_progress > STALL_TIMEOUT:
-            self.log(f"{peer.label} stopped sending blocks; trying another peer")
-            peer.work = 0
-            self.sync_peer = None
-            self._spawn(peer.close())
-            self._maybe_sync()
+            self._drop(peer, "stopped sending what we asked for; trying another peer", ban=False)
 
     # --- passing news on ----------------------------------------------------
 

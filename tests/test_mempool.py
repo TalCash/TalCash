@@ -1,4 +1,5 @@
 import copy
+import random
 from dataclasses import replace
 
 import pytest
@@ -190,3 +191,65 @@ def test_old_transfers_expire():
     clock.now += 1801
     assert pool.expire() == 2  # Alice's first, and her second (which depends on it)
     assert len(pool) == 1 and pool.next_nonce(ALICE.address) == 0
+
+
+class ScanningMempool(Mempool):
+    """The obvious, slow way to choose what to evict: look at every sender each time."""
+
+    def _trim_to_size(self) -> None:
+        while self._bytes > self.max_bytes:
+            last_of_each = (pending[max(pending)] for pending in self._by_sender.values())
+            self._remove(min(last_of_each, key=lambda e: (e.fee_rate, -e.added, e.tx.txid)))
+
+
+def outcome(pool: Mempool, tx) -> str:
+    try:
+        pool.add(tx)
+        return "added"
+    except ValidationError as error:
+        return error.code
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_indexes_and_eviction_match_scanning_everything(seed):
+    rng = random.Random(seed)
+    senders = [named_key(f"sender-{i}") for i in range(6)]
+    everyone = [*senders, CAROL, MINER]
+    ref = TestChain(PARAMS)
+    for key in senders:
+        ref.mine_blocks(1, miner=key.address)  # 10 TC each
+    ref.mine_blocks(3, miner=MINER.address)
+    node = ChainManager(Store(":memory:"), PARAMS, clock=lambda: NOW)
+    for block in ref.blocks[1:]:
+        node.submit_block(block)
+    clock = Clock(NOW)
+    pool = Mempool(PARAMS, node.store, clock=clock, max_bytes=3000)
+    scanning = ScanningMempool(PARAMS, node.store, clock=clock, max_bytes=3000)
+
+    for step in range(300):
+        clock.now += rng.choice([0, 0, 1])  # plenty of ties in time
+        sender = rng.choice(senders)
+        confirmed = node.get_account(sender.address).nonce
+        nonce = pool.next_nonce(sender.address)
+        if nonce > confirmed and rng.random() < 0.25:
+            nonce = rng.randrange(confirmed, nonce)  # a replacement
+        receivers = [(rng.choice(everyone).address, rng.randint(1, 10_000)) for _ in range(rng.randint(1, 3))]
+        tx = make_transfer(PARAMS, sender, nonce, receivers, fee=rng.randint(100, 3000),
+                           memo=bytes(rng.randrange(40)))
+        assert outcome(pool, tx) == outcome(scanning, tx)
+        if step % 60 == 59:  # a block with some of them
+            block = mine_template(node, pool)
+            result = node.submit_block(block)
+            pool.update(result.connected, result.disconnected)
+            scanning.update(result.connected, result.disconnected)
+
+        assert {e.tx.txid for e in pool.entries()} == {e.tx.txid for e in scanning.entries()}
+        assert pool.size_bytes == sum(e.size for e in pool.entries()) <= 3000
+        for key in everyone:
+            address = key.address
+            scan_in = {e.tx.txid for e in pool.entries() if any(o.address == address for o in e.tx.outputs)}
+            scan_all = scan_in | {e.tx.txid for e in pool.entries() if e.tx.sender == address}
+            assert {e.tx.txid for e in pool.incoming_for(address)} == scan_in
+            involving = pool.involving(address)
+            assert {e.tx.txid for e in involving} == scan_all
+            assert [e.added for e in involving] == sorted((e.added for e in involving), reverse=True)

@@ -17,7 +17,7 @@ These are node rules ("policy"), not consensus: every node chooses its own limit
 
 import heapq
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -62,6 +62,10 @@ class Mempool:
         self.clock = clock
         self._by_id: dict[bytes, MempoolEntry] = {}
         self._by_sender: dict[bytes, dict[int, MempoolEntry]] = {}
+        self._by_receiver: dict[bytes, dict[bytes, MempoolEntry]] = {}  # address -> txid -> entry
+        # Eviction candidates (each sender's last transfer), cheapest first. Entries that stopped
+        # being a sender's last are skipped when popped, so nothing has to be searched.
+        self._evictable: list[tuple[Fraction, float, bytes]] = []
         self._bytes = 0
 
     # --- reading ------------------------------------------------------------
@@ -78,13 +82,28 @@ class Mempool:
     def entries(self) -> list[MempoolEntry]:
         return list(self._by_id.values())
 
+    def iter_entries(self) -> Iterator[MempoolEntry]:
+        """Like entries(), without copying (don't change the mempool while iterating)."""
+        return iter(self._by_id.values())
+
     @property
     def size_bytes(self) -> int:
         return self._bytes
 
     def pending_for(self, address: bytes) -> list[MempoolEntry]:
+        """Transfers waiting to be sent from `address`, in nonce order."""
         pending = self._by_sender.get(address, {})
         return [pending[nonce] for nonce in sorted(pending)]
+
+    def incoming_for(self, address: bytes) -> list[MempoolEntry]:
+        """Transfers waiting that pay `address`."""
+        return list(self._by_receiver.get(address, {}).values())
+
+    def involving(self, address: bytes) -> list[MempoolEntry]:
+        """Transfers waiting that send from or pay `address`, newest first."""
+        entries = {e.tx.txid: e for e in self.pending_for(address)}
+        entries.update((e.tx.txid, e) for e in self.incoming_for(address))
+        return sorted(entries.values(), key=lambda e: -e.added)
 
     def next_nonce(self, address: bytes) -> int:
         """The nonce a new transfer from `address` should use."""
@@ -129,7 +148,12 @@ class Mempool:
             self._remove(replaced)
         entry = MempoolEntry(tx, size, added)
         self._by_id[tx.txid] = entry
-        self._by_sender.setdefault(tx.sender, {})[tx.nonce] = entry
+        pending = self._by_sender.setdefault(tx.sender, {})
+        pending[tx.nonce] = entry
+        for address in {o.address for o in tx.outputs}:
+            self._by_receiver.setdefault(address, {})[tx.txid] = entry
+        if tx.nonce == max(pending):
+            self._push_evictable(entry)
         self._bytes += size
         self._trim_to_size()
         if tx.txid not in self._by_id:
@@ -137,18 +161,39 @@ class Mempool:
         return entry
 
     def _remove(self, entry: MempoolEntry) -> None:
-        del self._by_id[entry.tx.txid]
-        pending = self._by_sender[entry.tx.sender]
-        del pending[entry.tx.nonce]
+        tx = entry.tx
+        del self._by_id[tx.txid]
+        pending = self._by_sender[tx.sender]
+        del pending[tx.nonce]
         if not pending:
-            del self._by_sender[entry.tx.sender]
+            del self._by_sender[tx.sender]
+        elif tx.nonce > max(pending):
+            self._push_evictable(pending[max(pending)])  # the one before it is now the sender's last
+        for address in {o.address for o in tx.outputs}:
+            incoming = self._by_receiver[address]
+            del incoming[tx.txid]
+            if not incoming:
+                del self._by_receiver[address]
         self._bytes -= entry.size
 
+    def _push_evictable(self, entry: MempoolEntry) -> None:
+        heapq.heappush(self._evictable, (entry.fee_rate, -entry.added, entry.tx.txid))
+        if len(self._evictable) > 2 * len(self._by_sender) + 1000:  # mostly stale: rebuild
+            self._evictable = [(e.fee_rate, -e.added, e.tx.txid)
+                               for e in (p[max(p)] for p in self._by_sender.values())]
+            heapq.heapify(self._evictable)
+
     def _trim_to_size(self) -> None:
+        # Only a sender's last transfer can go without leaving a nonce gap; the cheapest goes first.
         while self._bytes > self.max_bytes:
-            # Only a sender's last transfer can go without leaving a nonce gap.
-            last_of_each = (pending[max(pending)] for pending in self._by_sender.values())
-            self._remove(min(last_of_each, key=lambda e: (e.fee_rate, -e.added)))
+            _, _, txid = heapq.heappop(self._evictable)
+            entry = self._by_id.get(txid)
+            if entry is None:
+                continue  # already gone
+            pending = self._by_sender[entry.tx.sender]
+            if entry.tx.nonce != max(pending):
+                continue  # no longer the sender's last (it's pushed again if it becomes last)
+            self._remove(entry)
 
     # --- keeping up with the chain ------------------------------------------
 

@@ -12,7 +12,7 @@ COIN = 10**DECIMALS
 # so every database and language can store it exactly).
 MAX_AMOUNT = 2**63 - 1
 
-_AMOUNT_RE = re.compile(rf"^(\d+)(?:\.(\d{{1,{DECIMALS}}}))?$")
+_AMOUNT_RE = re.compile(rf"^([0-9]+)(?:\.([0-9]{{1,{DECIMALS}}}))?$")  # ASCII digits only
 
 
 def parse_amount(text: str) -> int:

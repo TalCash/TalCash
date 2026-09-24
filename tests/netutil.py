@@ -1,18 +1,23 @@
 """Run several real nodes (API + peer-to-peer) on this machine, each on its own port."""
 
+import json
+import os
 import socket
 import threading
 import time
 from pathlib import Path
 
 import httpx
+import pytest
 import uvicorn
+from websockets.exceptions import ConnectionClosed
+from websockets.sync.client import connect
 
 from technocoin.core.block import Block, block_from_bytes
 from technocoin.core.params import NetworkParams
 from technocoin.core.pow import mine
 from technocoin.core.tx import Transfer
-from technocoin.node.api import create_app
+from technocoin.node.api import ApiPolicy, create_app
 from technocoin.node.p2p import MAX_MESSAGE_BYTES, P2PConfig
 from technocoin.node.service import NodeService
 from technocoin.node.store import Store
@@ -33,8 +38,10 @@ def wait_until(condition, what: str, timeout: float = 30.0) -> None:
 
 
 class LocalNode:
-    def __init__(self, name: str, folder: Path, params: NetworkParams, peers: list["LocalNode"] = ()) -> None:
+    def __init__(self, name: str, folder: Path, params: NetworkParams, peers: list["LocalNode"] = (),
+                 policy: ApiPolicy = ApiPolicy()) -> None:
         self.name = name
+        self.policy = policy
         self.folder = folder
         self.params = params
         self.port = free_port()
@@ -60,7 +67,9 @@ class LocalNode:
         app = create_app(
             lambda: NodeService(self.params, Store(self.folder / "chain.sqlite"), log=self.log.append),
             p2p=P2PConfig(listen_url=self.p2p_url, connect=self.peer_urls, peers_file=self.folder / "peers.json"),
+            policy=self.policy,
         )
+        self.app = app
         config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning",
                                 ws="websockets-sansio", ws_max_size=MAX_MESSAGE_BYTES)
         self.server = uvicorn.Server(config)
@@ -117,3 +126,45 @@ class LocalNode:
     def send(self, tx: Transfer) -> None:
         response = httpx.post(f"{self.url}/v1/tx", json={"hex": tx.serialize().hex()}, timeout=10)
         assert response.status_code == 200, response.json()
+
+
+# --- a hand-written peer, to send a node anything we like ------------------------------------
+
+
+def raw_peer(node: LocalNode):
+    """Connect to the node's peer-to-peer endpoint; returns the socket and the node's hello."""
+    socket = connect(node.p2p_url, max_size=MAX_MESSAGE_BYTES, open_timeout=5)
+    hello = json.loads(socket.recv(timeout=5))
+    assert hello["type"] == "hello"
+    return socket, hello
+
+
+def say_hello(socket, hello: dict, **changes) -> str:
+    """Answer the node's hello as a new node (a fresh node id). Returns the node id used."""
+    node_id = changes.pop("node_id", os.urandom(16).hex())
+    socket.send(json.dumps({**hello, "node_id": node_id, "listen": None, **changes}))
+    return node_id
+
+
+def receive_until(socket, kind: str, timeout: float = 10) -> tuple[dict, list[dict]]:
+    """Read messages until one of type `kind`; returns it and everything received before it."""
+    before = []
+    deadline = time.monotonic() + timeout
+    while True:
+        message = json.loads(socket.recv(timeout=max(0.1, deadline - time.monotonic())))
+        if message["type"] == kind:
+            return message, before
+        before.append(message)
+
+
+def assert_disconnected(socket) -> None:
+    """The node must hang up on us (going silent isn't enough)."""
+    with pytest.raises(ConnectionClosed):
+        for _ in range(10):
+            socket.recv(timeout=10)  # it may send a message or two (e.g. get_peers) before hanging up
+
+
+def assert_still_connected(socket) -> None:
+    """The node still answers us."""
+    socket.send(json.dumps({"type": "get_peers"}))
+    receive_until(socket, "peers")
