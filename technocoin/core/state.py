@@ -75,20 +75,38 @@ class _Overlay:
         self.set(address, Account(balance, account.nonce))
 
 
-def check_header(header: BlockHeader, ctx: BlockContext, params: NetworkParams) -> None:
-    """Header rules that depend on the parent, including proof of work."""
-    if header.height != ctx.parent.height + 1:
-        raise ValidationError("bad-height", f"expected {ctx.parent.height + 1}, got {header.height}")
-    if header.prev_id != ctx.parent.block_id:
+def check_header_against_parent(
+    header: BlockHeader,
+    parent: BlockHeader,
+    median_time_past: int,
+    expected_target: int,
+    params: NetworkParams,
+    *,
+    check_pow: bool = True,
+) -> None:
+    """Header rules that need only the chain of headers (not balances), including proof of work.
+
+    A node can run these on a block from any branch as soon as it arrives.
+    """
+    if header.height != parent.height + 1:
+        raise ValidationError("bad-height", f"expected {parent.height + 1}, got {header.height}")
+    if header.prev_id != parent.block_id:
         raise ValidationError("bad-prev-id")
-    if header.timestamp <= ctx.median_time_past:
+    if header.timestamp <= median_time_past:
         raise ValidationError("time-too-old", "timestamp must be after the median of the last 11 blocks")
-    if header.target != ctx.expected_target:
+    if header.target != expected_target:
         raise ValidationError("bad-target")
+    if check_pow and not meets_target(header, params.pow):
+        raise ValidationError("bad-pow")
+
+
+def check_header(header: BlockHeader, ctx: BlockContext, params: NetworkParams, *, check_pow: bool = True) -> None:
+    """All header rules. `check_pow=False` only for headers whose proof of work was already checked."""
+    check_header_against_parent(
+        header, ctx.parent, ctx.median_time_past, ctx.expected_target, params, check_pow=check_pow
+    )
     if header.snapshot_root != ctx.snapshot_root:
         raise ValidationError("bad-snapshot-root")
-    if not meets_target(header, params.pow):
-        raise ValidationError("bad-pow")
 
 
 def check_not_in_future(header: BlockHeader, now: int, params: NetworkParams) -> None:
@@ -97,12 +115,14 @@ def check_not_in_future(header: BlockHeader, now: int, params: NetworkParams) ->
         raise ValidationError("time-too-new", "block timestamp is too far in the future")
 
 
-def apply_block(block: Block, ctx: BlockContext, state: StateView, params: NetworkParams) -> StateChanges:
+def apply_block(
+    block: Block, ctx: BlockContext, state: StateView, params: NetworkParams, *, check_pow: bool = True
+) -> StateChanges:
     """Validate `block` on top of `state` and return the resulting changes.
 
     Raises ValidationError if the block breaks any rule. `state` is not modified.
     """
-    check_header(block.header, ctx, params)
+    check_header(block.header, ctx, params, check_pow=check_pow)
     check_block(block, params)
 
     overlay = _Overlay(state)

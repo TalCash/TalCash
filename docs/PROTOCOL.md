@@ -11,7 +11,8 @@ Status of each part:
 |---|---|
 | Amounts, encoding, hashing, addresses, transactions, blocks, PoW, difficulty, state, balance snapshots | Implemented and tested |
 | Genesis | Implemented; mainnet/testnet genesis gets mined at launch |
-| Chain selection, finality, mempool policy | Node (step 3-4), rules fixed here |
+| Chain selection, reorganisation, finality | Implemented in `technocoin/node/chain.py` and tested |
+| Mempool policy | Planned (step 4) |
 | Chunk files, mega chunks, fast sync, P2P, API | Planned (steps 5-6), outline only |
 
 ---

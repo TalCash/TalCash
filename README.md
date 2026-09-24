@@ -18,12 +18,29 @@ The full rules are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 ```
 technocoin/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
 technocoin/crypto/   keys, passphrases, addresses
+technocoin/wallet/   encrypted wallet file
+technocoin/node/     SQLite storage and chain manager (branches, reorganisation, finality)
+technocoin/cli.py    the `tc` command
 tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
 
-Coming next: `technocoin/node` (storage, chain, mempool, API, P2P, chunks),
-`technocoin/miner`, `technocoin/wallet` (CLI).
+Coming next: mempool and miner, then the node's HTTP/WebSocket API, peer-to-peer
+sync with chunks, and launch.
+
+## Wallet
+
+```
+python -m technocoin wallet create          # new wallet; shows your 24 words once
+python -m technocoin wallet restore         # from your 24 words
+python -m technocoin wallet addresses
+python -m technocoin wallet new-address
+python -m technocoin wallet show-passphrase
+```
+
+Add `--network testnet` or `--network regtest` before `wallet` for other networks.
+Wallets live in `~/.technocoin/<network>/wallet.json` (change with `--datadir` or
+`TECHNOCOIN_HOME`). After `pip install -e .` the command is simply `tc`.
 
 ## Development
 

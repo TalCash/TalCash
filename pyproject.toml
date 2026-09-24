@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["PyNaCl>=1.5"]
 
+[project.scripts]
+tc = "technocoin.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
