@@ -6,7 +6,7 @@
     tc wallet new-address            add another address
     tc wallet show-passphrase        show your 24 words again
     tc wallet balance                balances (asks the node)
-    tc wallet send ADDRESS AMOUNT    send coins
+    tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...]    send coins (one or many receivers)
     tc wallet history                recent transactions
     tc node [--mine [ADDRESS]]       run a node, optionally mining (to your wallet by default)
 
@@ -24,7 +24,7 @@ from pathlib import Path
 from . import paths
 from .core.amounts import format_amount, parse_amount
 from .core.params import NETWORKS, NetworkParams
-from .core.tx import MAX_MEMO_SIZE, Output, Transfer
+from .core.tx import MAX_MEMO_SIZE, MAX_OUTPUTS, Output, Transfer
 from .crypto.address import decode_address
 from .node.network import load_params, reset_devnet
 from .node.server import run_node
@@ -164,39 +164,58 @@ def cmd_balance(args: argparse.Namespace, params: NetworkParams) -> int:
     return 0
 
 
+def _parse_payments(words: list[str], params: NetworkParams) -> list[tuple[str, bytes, int]]:
+    """["td1...", "2.5", "td1...", "1"] -> [(text, payload, base units), ...]"""
+    if len(words) % 2:
+        raise CommandError("give the receivers as pairs: ADDRESS AMOUNT [ADDRESS AMOUNT ...]")
+    payments = []
+    for text, amount_text in zip(words[::2], words[1::2]):
+        try:
+            payload = decode_address(text, params.address_prefix)
+        except ValueError as error:
+            raise CommandError(f"{text}: {error}") from None
+        units = parse_amount(amount_text)
+        if units == 0:
+            raise CommandError(f"the amount for {text} must be more than 0")
+        payments.append((text, payload, units))
+    if len(payments) > MAX_OUTPUTS:
+        raise CommandError(f"at most {MAX_OUTPUTS} receivers per payment")
+    return payments
+
+
 def cmd_send(args: argparse.Namespace, params: NetworkParams) -> int:
     wallet = _load(args, params)
     sender = next((a for a in wallet.addresses if a.index == args.from_index), None)
     if sender is None:
         raise CommandError(f"the wallet has no address #{args.from_index}")
-    receiver = decode_address(args.to, params.address_prefix)
-    amount = parse_amount(args.amount)
-    if amount == 0:
-        raise CommandError("the amount must be more than 0")
+    payments = _parse_payments(args.payments, params)
+    total = sum(units for _, _, units in payments)
     memo = (args.memo or "").encode("utf-8")
     if len(memo) > MAX_MEMO_SIZE:
         raise CommandError(f"the memo can be at most {MAX_MEMO_SIZE} bytes")
 
     client, status = _client(args, params)
     info = client.address(sender.address)
-    size = Transfer(params.network_id, bytes(32), 0, 0, (Output(receiver, amount),), memo).size
+    outputs = tuple(Output(payload, units) for _, payload, units in payments)
+    size = Transfer(params.network_id, bytes(32), 0, 0, outputs, memo).size  # values don't change the size
     fee = parse_amount(args.fee) if args.fee else parse_amount(status["min_fee_per_byte"]) * size
     available = parse_amount(info["available"])
-    if amount + fee > available:
+    if total + fee > available:
         raise CommandError(f"not enough coins: {format_amount(available)} TC available at #{sender.index}, "
-                           f"this needs {format_amount(amount + fee)} TC")
+                           f"this needs {format_amount(total + fee)} TC")
 
     print(f"From:   {sender.address} (#{sender.index})")
-    print(f"To:     {args.to}")
-    print(f"Amount: {format_amount(amount)} TC")
+    for text, _, units in payments:
+        print(f"To:     {text}  {format_amount(units)} TC")
     print(f"Fee:    {format_amount(fee)} TC")
+    print(f"Total:  {format_amount(total + fee)} TC")
     if memo:
         print(f"Memo:   {args.memo}")
     if not args.yes and input("Send? [y/N] ").strip().lower() not in ("y", "yes"):
         print("Cancelled.")
         return 1
     tx = wallet.sign_transfer(getpass.getpass("Wallet password: "), index=sender.index, nonce=info["next_nonce"],
-                              fee=fee, outputs=[(args.to, amount)], memo=memo)
+                              fee=fee, outputs=[(text, units) for text, _, units in payments], memo=memo)
     txid = client.submit(tx)["txid"]
     print(f"Sent. Transaction {txid}")
     if args.wait:
@@ -277,9 +296,9 @@ def build_parser() -> argparse.ArgumentParser:
     ]:
         wallet_commands.add_parser(name, help=help_text).set_defaults(handler=handler)
 
-    send = wallet_commands.add_parser("send", help="send coins")
-    send.add_argument("to", help="receiving address")
-    send.add_argument("amount", help="amount in TC, e.g. 12.5")
+    send = wallet_commands.add_parser("send", help="send coins to one or more addresses in one payment")
+    send.add_argument("payments", nargs="+", metavar="ADDRESS AMOUNT",
+                      help="receiver and amount in TC, e.g. td1... 12.5 (repeat for more receivers)")
     send.add_argument("--fee", help="fee in TC (default: the node's minimum)")
     send.add_argument("--from", dest="from_index", type=int, default=0, help="send from address #N (default 0)")
     send.add_argument("--memo", help="a short note stored with the payment (public)")

@@ -85,6 +85,53 @@ def test_wallet_commands_against_a_running_node(tmp_path, node_url, monkeypatch,
     assert "not enough coins" in capsys.readouterr().err
 
 
+def test_paying_several_wallets_and_spending_what_you_received(tmp_path, node_url, monkeypatch, capsys):
+    alice, _ = Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    bob, _ = Wallet.create(tmp_path / "bob.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    carol, _ = Wallet.create(tmp_path / "carol.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    bob_address, carol_address = bob.addresses[0].address, carol.addresses[0].address
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": PASSWORD)
+    base = ["--network", "regtest", "--datadir", str(tmp_path), "wallet", "--node", node_url]
+    as_bob = base + ["--file", str(tmp_path / "bob.json")]
+    as_carol = base + ["--file", str(tmp_path / "carol.json")]
+
+    def available(args) -> str:
+        assert main(args + ["balance"]) == 0
+        return next(line for line in capsys.readouterr().out.splitlines() if line.startswith("Available now"))
+
+    mine_to(node_url, alice.addresses[0].address, 5)  # 20 TC spendable
+    # One payment, two receivers.
+    assert main(base + ["send", bob_address, "3", carol_address, "1.25", "--memo", "split", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert f"To:     {bob_address}  3 TC" in out and f"To:     {carol_address}  1.25 TC" in out
+    assert "Fee:    0.00018 TC" in out  # 180 bytes: 146 + a second receiver (29) + a 5-byte memo
+    # A second payment before any block is mined (next nonce, still waiting).
+    assert main(base + ["send", carol_address, "0.5", "--yes"]) == 0
+    capsys.readouterr()
+    assert available(as_carol) == "Available now: 0 TC"  # not mined yet
+
+    mine_to(node_url, alice.addresses[0].address, 1)
+    assert available(as_bob) == "Available now: 3 TC"
+    assert available(as_carol) == "Available now: 1.75 TC"
+
+    # Bob spends coins he received.
+    assert main(as_bob + ["send", carol_address, "1", "--yes"]) == 0
+    capsys.readouterr()
+    mine_to(node_url, alice.addresses[0].address, 1)
+    assert available(as_bob) == "Available now: 1.999854 TC"  # 3 - 1 - 0.000146 fee
+    assert available(as_carol) == "Available now: 2.75 TC"
+
+    assert main(as_carol + ["history"]) == 0
+    history = capsys.readouterr().out
+    assert history.count("received from") == 3 and f"from {bob_address}" in history
+
+    # Mistakes are caught before anything is signed.
+    assert main(base + ["send", bob_address]) == 1
+    assert "pairs" in capsys.readouterr().err
+    assert main(base + ["send", bob_address, "1", "tc1typo", "1", "--yes"]) == 1
+    assert "tc1typo" in capsys.readouterr().err
+
+
 def test_wallet_explains_when_no_node_is_running(tmp_path, capsys):
     Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
     args = ["--network", "regtest", "--datadir", str(tmp_path), "wallet", "--node", f"http://127.0.0.1:{free_port()}",

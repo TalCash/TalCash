@@ -52,6 +52,7 @@ While the node runs, in a second terminal:
 ```
 python -m technocoin --network devnet wallet balance
 python -m technocoin --network devnet wallet send td1... 12.5 --memo "thanks" --wait
+python -m technocoin --network devnet wallet send td1... 3 td1... 1.25    # several receivers, one payment
 python -m technocoin --network devnet wallet history
 ```
 
@@ -64,7 +65,7 @@ tc wallet addresses          your addresses
 tc wallet new-address        add another address
 tc wallet show-passphrase    your 24 words again
 tc wallet balance            available, incoming, outgoing, unlocking
-tc wallet send ADDRESS AMOUNT [--fee X] [--from N] [--memo TEXT] [--wait] [--yes]
+tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...] [--fee X] [--from N] [--memo TEXT] [--wait] [--yes]
 tc wallet history
 ```
 
