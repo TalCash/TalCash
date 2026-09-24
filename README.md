@@ -27,7 +27,7 @@ tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
 
-Coming next: downloading chunk files during sync, hardening, a public testnet, then launch.
+Coming next: hardening, a public testnet, then launch.
 
 ## Try it: a local devnet
 
@@ -83,6 +83,10 @@ python -m technocoin read <file>.chunk [--blocks]         # check a file and sho
 ```
 
 Copy the `blocks` folder to another machine and `--reindex` there gives it the whole chain.
+
+A node that joins late downloads the sealed day files from its peers and imports a whole day at
+a time, then fetches only the newest blocks one by one. Nodes remember the peers they reached
+(`peers.json`), so after a restart no `--peer` is needed.
 
 ## Wallet
 

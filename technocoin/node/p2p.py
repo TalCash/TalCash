@@ -18,14 +18,22 @@ peer that isn't known to have it; peers fetch only what they lack, so nothing
 travels twice and nothing loops.
 
 Catching up: when a peer has more total work than us (from its hello), or sends
-a block whose parent we lack, we ask it for headers after our locator, download
-those blocks 64 at a time in order, and hand them to the chain manager, which
-switches branches if theirs has more work. One peer at a time; a peer that
-stalls for 30 seconds is dropped and another is tried.
+a block whose parent we lack, we catch up from it. First, whole sealed days:
+if its hello says it has sealed chunks we don't, we download those chunk files
+over HTTP (GET /v1/chunks/{i} on the same port) and import each in one go
+(checked in a background thread, then applied in one database transaction).
+Then the rest block by block: headers after our locator, then those blocks 64
+at a time, in order; the chain manager switches branches if theirs has more
+work. One peer at a time; a peer that stalls for 30 seconds is dropped and
+another is tried. A chunk that doesn't fit our chain (we're on a different
+branch) or can't be downloaded just means falling back to block by block.
 
-Misbehaviour (malformed messages, invalid blocks, wrong network) gets the peer
-disconnected. Harmless disagreements (a clock slightly off, a fork deeper than
-our finality) don't.
+Misbehaviour (malformed messages, invalid blocks, damaged chunk files, wrong
+network) gets the peer disconnected. Harmless disagreements (a clock slightly
+off, a fork deeper than our finality) don't.
+
+Addresses of nodes we managed to connect to are saved (peers.json) so a
+restarted node finds the network again without being told.
 """
 
 import asyncio
@@ -36,7 +44,9 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import httpx
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidURI
@@ -45,7 +55,8 @@ from .. import __version__
 from ..core.block import Block, block_from_bytes, header_from_bytes
 from ..core.errors import DecodeError, ValidationError
 from ..core.tx import Transfer, transaction_from_bytes
-from .chain import Outcome
+from .blockfiles import ChunkError
+from .chain import Outcome, check_chunk_file
 from .service import NodeService
 
 PROTOCOL_VERSION = 1
@@ -60,6 +71,9 @@ STALL_TIMEOUT = 30
 SEND_QUEUE_LIMIT = 5000
 KNOWN_LIMIT = 20_000
 CHECK_INTERVAL = 2
+SAVE_PEERS_INTERVAL = 30
+MAX_CHUNK_FILE_BYTES = 256 * 1024 * 1024
+BAD_PEER_TIMEOUT = 600  # don't redial a peer that sent a damaged chunk for 10 minutes
 
 # Block rejections that don't mean the peer is misbehaving.
 _HARMLESS_BLOCK_ERRORS = {"time-too-new", "fork-below-finality"}
@@ -67,6 +81,28 @@ _HARMLESS_BLOCK_ERRORS = {"time-too-new", "fork-below-finality"}
 
 class ProtocolError(Exception):
     """The peer broke the protocol; disconnect it."""
+
+
+def _http_base(ws_url: str | None) -> str | None:
+    """ws://host:port/v1/p2p -> http://host:port (a node's API is on the same port)."""
+    if not ws_url or not ws_url.startswith(("ws://", "wss://")):
+        return None
+    return "http" + ws_url[2:].split("/v1/")[0]
+
+
+async def download_chunk(http_base: str, index: int) -> bytes | None:
+    """A peer's sealed chunk file, or None if it doesn't have it. Refuses absurdly large files."""
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream("GET", f"{http_base}/v1/chunks/{index}") as response:
+            if response.status_code != 200:
+                return None
+            parts, total = [], 0
+            async for part in response.aiter_bytes():
+                total += len(part)
+                if total > MAX_CHUNK_FILE_BYTES:
+                    raise ProtocolError("chunk file too large")
+                parts.append(part)
+            return b"".join(parts)
 
 
 class _Recent:
@@ -92,6 +128,7 @@ class P2PConfig:
     connect: list[str] = field(default_factory=list)  # nodes to always stay connected to
     target_outbound: int = 8
     max_inbound: int = 32
+    peers_file: Path | None = None  # remember working addresses here across restarts
 
 
 class Peer:
@@ -104,6 +141,8 @@ class Peer:
         self.node_id = ""
         self.height = 0
         self.work = 0
+        self.chunks = 0  # sealed chunks the peer can serve
+        self.http_url: str | None = None  # the peer's API (for chunk downloads)
         self.known_blocks = _Recent()
         self.known_txs = _Recent()
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -178,12 +217,46 @@ class PeerManager:
         self.retry_at: dict[str, float] = {}
         self.failures: dict[str, int] = {}
         self.sync_peer: Peer | None = None
+        self.banned: dict[str, float] = {}  # node id -> refused until (monotonic time)
         self.rejected_txs = _Recent()
         self._tasks: set[asyncio.Task] = set()
         if config.listen_url:
             self.self_urls.add(config.listen_url)
+        self.remembered: set[str] = set()
+        self._remembered_changed = False
+        self._load_peers()
         service.tip_listeners.append(self._on_new_tip)
         service.tx_listeners.append(self._on_new_tx)
+
+    # --- remembering peers across restarts ---------------------------------------
+
+    def _load_peers(self) -> None:
+        path = self.config.peers_file
+        if path is None or not path.exists():
+            return
+        try:
+            urls = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # a damaged peers file isn't worth failing over
+        for url in urls if isinstance(urls, list) else []:
+            if _valid_url(url) and url not in self.self_urls:
+                self.remembered.add(url)
+                self.addresses.setdefault(url, None)
+
+    def _remember(self, url: str) -> None:
+        if url not in self.remembered and url not in self.self_urls:
+            self.remembered.add(url)
+            self._remembered_changed = True
+
+    def _save_peers(self) -> None:
+        path = self.config.peers_file
+        if path is None or not self._remembered_changed:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(sorted(self.remembered)[:1000], indent=1), encoding="utf-8")
+        os.replace(temporary, path)
+        self._remembered_changed = False
 
     def log(self, text: str) -> None:
         self.service.log(f"{time.strftime('%H:%M:%S')}  p2p: {text}")
@@ -196,12 +269,17 @@ class PeerManager:
 
     async def run(self) -> None:
         """Keep outbound connections up and watch for stalled downloads. Runs until cancelled."""
+        last_save = time.monotonic()
         try:
             while True:
                 self._dial_more()
                 self._check_stall()
+                if time.monotonic() - last_save > SAVE_PEERS_INTERVAL:
+                    self._save_peers()
+                    last_save = time.monotonic()
                 await asyncio.sleep(CHECK_INTERVAL)
         finally:
+            self._save_peers()
             for task in list(self._tasks):
                 task.cancel()
             for peer in list(self.peers):
@@ -319,6 +397,7 @@ class PeerManager:
             "node_id": self.node_id,
             "height": tip.height,
             "work": f"{tip.chain_work:x}",
+            "chunks": self.service.store.sealed_chunks(),
             "listen": self.config.listen_url,
             "agent": f"technocoin/{__version__}",
         }
@@ -339,6 +418,8 @@ class PeerManager:
                 self.self_urls.add(peer.url)
             peer.closed = True  # connected to ourselves
             return
+        if self.banned.get(node_id, 0) > time.monotonic():
+            raise ProtocolError("temporarily banned for misbehaving")
         if peer.url:
             self.url_node[peer.url] = node_id
         if _valid_url(message.get("listen")):
@@ -349,12 +430,17 @@ class PeerManager:
         try:
             peer.height = int(message.get("height", 0))
             peer.work = int(message.get("work", "0"), 16)
+            peer.chunks = max(0, int(message.get("chunks", 0)))
         except (TypeError, ValueError):
-            raise ProtocolError("bad height or work") from None
+            raise ProtocolError("bad height, work or chunks") from None
         peer.node_id = node_id
         peer.ready = True
-        if _valid_url(message.get("listen")) and not peer.outbound:
-            self._learn(message["listen"])
+        listen = message.get("listen") if _valid_url(message.get("listen")) else None
+        peer.http_url = _http_base(peer.url if peer.outbound else listen)
+        if peer.outbound:
+            self._remember(peer.url)
+        elif listen:
+            self._learn(listen)
         self.log(f"connected to {peer.label} ({'outbound' if peer.outbound else 'inbound'}, height {peer.height})")
 
         peer.send({"type": "get_peers"})
@@ -494,7 +580,57 @@ class PeerManager:
         self.sync_peer = peer
         peer.last_progress = time.monotonic()
         self.log(f"catching up from {peer.label} (our height {self.service.chain.tip_height})")
+        if peer.http_url and peer.chunks > self.service.store.sealed_chunks():
+            self._spawn(self._sync_chunks(peer))  # whole days first, then the rest block by block
+        else:
+            self._request_headers(peer)
+
+    def _request_headers(self, peer: Peer) -> None:
         peer.send({"type": "get_headers", "locator": [i.hex() for i in self.service.chain.locator()]})
+
+    async def _sync_chunks(self, peer: Peer) -> None:
+        """Download and import the peer's sealed chunks we don't have yet."""
+        loop = asyncio.get_running_loop()
+        try:
+            while peer is self.sync_peer and not peer.closed:
+                index = self.service.store.sealed_chunks()
+                if index >= peer.chunks:
+                    break
+                peer.last_progress = time.monotonic()
+                try:
+                    data = await download_chunk(peer.http_url, index)
+                except (httpx.HTTPError, ProtocolError) as error:
+                    self.log(f"couldn't download chunk {index} from {peer.label} ({error}); going block by block")
+                    break
+                if data is None:
+                    break
+                try:
+                    checked = await loop.run_in_executor(None, check_chunk_file, data, self.service.params)
+                    self.service.import_chunk(checked, origin=peer)
+                except ValidationError as error:
+                    if error.code == "chunk-not-next":
+                        break  # our chain differs from theirs here: go block by block
+                    self._drop_bad_peer(peer, f"sent an invalid chunk {index} ({error.code})")
+                    return
+                except ChunkError as error:
+                    self._drop_bad_peer(peer, f"sent a damaged chunk {index} ({error})")
+                    return
+                peer.last_progress = time.monotonic()
+        finally:
+            if peer is self.sync_peer and not peer.closed:
+                self._request_headers(peer)
+
+    def _drop_bad_peer(self, peer: Peer, reason: str) -> None:
+        self.log(f"{peer.label} {reason}; disconnecting")
+        until = time.monotonic() + BAD_PEER_TIMEOUT
+        if peer.url:
+            self.retry_at[peer.url] = until
+        self.banned[peer.node_id] = until  # also refuse it when it connects to us
+        peer.work = 0
+        if self.sync_peer is peer:
+            self.sync_peer = None
+        self._spawn(peer.close())
+        self._maybe_sync()
 
     def _on_headers(self, peer: Peer, message: dict) -> None:
         values = message.get("headers", [])

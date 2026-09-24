@@ -11,9 +11,10 @@ import uvicorn
 from ..core.block import Block
 from ..core.params import NetworkParams
 from ..miner.engine import Miner
+from ..paths import network_dir
 from .api import create_app
-from .p2p import MAX_MESSAGE_BYTES, P2PConfig
 from .chain import Outcome
+from .p2p import MAX_MESSAGE_BYTES, P2PConfig
 from .service import NodeService, print_now
 
 HOUSEKEEPING_SECONDS = 60
@@ -93,7 +94,8 @@ def run_node(
     port = params.default_port if port is None else port
     if public_url is None and host not in ("0.0.0.0", "::") and port != 0:
         public_url = f"ws://{host}:{port}/v1/p2p"
-    p2p = P2PConfig(listen_url=public_url, connect=list(peers or []))
+    p2p = P2PConfig(listen_url=public_url, connect=list(peers or []),
+                    peers_file=network_dir(params.name, base) / "peers.json")
     server: uvicorn.Server | None = None
 
     def stop() -> None:

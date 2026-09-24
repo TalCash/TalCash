@@ -24,15 +24,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from ..core.block import Block, BlockHeader, block_from_bytes, check_block
-from ..core.errors import DecodeError
-from ..core.pow import meets_target
-from .blockfiles import decode_chunk
 from ..core.difficulty import block_work, median_time_past, next_target
-from ..core.errors import ValidationError
+from ..core.errors import DecodeError, ValidationError
 from ..core.genesis import genesis_block
 from ..core.params import NetworkParams
+from ..core.pow import meets_target
 from ..core.snapshot import NO_SNAPSHOT, is_snapshot_point, snapshot_height, state_root
 from ..core.state import Account, BlockContext, apply_block, check_header_against_parent, check_not_in_future
+from .blockfiles import ChunkFile, decode_chunk
 from .store import STATUS_INVALID, STATUS_STORED, STATUS_VALID, Store, StoredHeader
 
 
@@ -53,6 +52,36 @@ class SubmitResult:
     # orphans that got connected afterwards. The mempool uses these.
     connected: list[Block] = field(default_factory=list)
     disconnected: list[Block] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CheckedChunk:
+    """A chunk file that passed every check that needs no chain state (see check_chunk_file)."""
+
+    data: bytes
+    chunk: ChunkFile
+    blocks: list[Block]
+
+
+def check_chunk_file(data: bytes, params: NetworkParams) -> CheckedChunk:
+    """File integrity, shape and every block's proof of work (on all cores).
+
+    Touches no database, so a node can run it in a background thread while it keeps serving.
+    Raises ChunkError or ValidationError.
+    """
+    chunk = decode_chunk(data)
+    if chunk.network_id != params.network_id:
+        raise ValidationError("wrong-network", "chunk is from another network")
+    if chunk.first_height != chunk.index * params.chunk_size or len(chunk.blocks) != params.chunk_size:
+        raise ValidationError("bad-chunk", "a chunk holds exactly one full day of blocks")
+    try:
+        blocks = [block_from_bytes(b) for b in chunk.blocks]
+    except DecodeError as error:
+        raise ValidationError("bad-chunk", f"unreadable block: {error}") from None
+    with ThreadPoolExecutor() as pool:  # Argon2 releases the GIL, so threads really run in parallel
+        if not all(pool.map(lambda b: meets_target(b.header, params.pow), blocks)):
+            raise ValidationError("bad-pow", "a block in the chunk has invalid proof of work")
+    return CheckedChunk(data, chunk, blocks)
 
 
 class _ConnectFailed(Exception):
@@ -317,50 +346,50 @@ class ChainManager:
             self.store.seal_chunk(self.params.network_id, index, index * size, last)
 
     def import_chunk(self, data: bytes) -> int:
-        """Add a whole sealed chunk (from our own files, or later from a peer) that continues the
-        active chain. One database transaction for the whole chunk, proof of work checked on all
-        cores. Every rule is still checked. Returns how many new blocks were added."""
-        chunk = decode_chunk(data)  # raises ChunkError if damaged
-        params, size = self.params, self.params.chunk_size
-        if chunk.network_id != params.network_id:
-            raise ValidationError("wrong-network", "chunk is from another network")
+        """Check and add a whole sealed chunk (see apply_chunk). Returns how many blocks were new."""
+        return len(self.apply_chunk(check_chunk_file(data, self.params)))
+
+    def apply_chunk(self, checked: CheckedChunk) -> list[Block]:
+        """Add a checked chunk (from our own files or a peer) that continues the active chain.
+
+        One database transaction for the whole chunk; every consensus rule is applied to every
+        block. Blocks we already have on the active chain are skipped. Raises ValidationError with
+        code "chunk-not-next" if the chunk isn't the next one for our chain (not the peer's fault),
+        or another code if a block breaks a rule. Returns the newly connected blocks.
+        """
+        chunk = checked.chunk
         if chunk.index != self.store.sealed_chunks():
-            raise ValidationError("bad-chunk", f"expected chunk {self.store.sealed_chunks()}, got {chunk.index}")
-        if chunk.first_height != chunk.index * size or len(chunk.blocks) != size:
-            raise ValidationError("bad-chunk", "a chunk holds exactly one full day of blocks")
-        try:
-            blocks = [block_from_bytes(b) for b in chunk.blocks]
-        except DecodeError as error:
-            raise ValidationError("bad-chunk", f"unreadable block: {error}") from None
-
-        new = [b for b in blocks if not self.is_on_main_chain(b.block_id)]
-        with ThreadPoolExecutor() as pool:  # Argon2 releases the GIL, so threads really run in parallel
-            if not all(pool.map(lambda b: meets_target(b.header, params.pow), new)):
-                raise ValidationError("bad-pow", "a block in the chunk has invalid proof of work")
-
+            raise ValidationError("chunk-not-next", f"expected chunk {self.store.sealed_chunks()}, got {chunk.index}")
         wrote_file = not self.store.files.has_chunk(chunk.index)
         if wrote_file:
-            self.store.files.save_chunk_bytes(chunk.index, data)
+            self.store.files.save_chunk_bytes(chunk.index, checked.data)
+        added: list[Block] = []
         try:
             with self.store.transaction():
-                for block, location in zip(blocks, chunk.locations):
-                    if self.is_on_main_chain(block.block_id):
+                for block, location in zip(checked.blocks, chunk.locations):
+                    known = self.store.header(block.block_id)
+                    if known is not None and self.store.main_id(known.height) == block.block_id:
                         self.store.set_location(block.block_id, location)
                         continue
                     tip = self.tip
                     if block.header.prev_id != tip.block_id:
-                        raise ValidationError("bad-chunk", "chunk doesn't continue the active chain")
-                    work = tip.chain_work + block_work(block.header.target)
-                    self.store.add_block(block, work, STATUS_STORED, location)
+                        raise ValidationError("chunk-not-next", "the chunk doesn't continue our active chain")
+                    if known is None:
+                        work = tip.chain_work + block_work(block.header.target)
+                        self.store.add_block(block, work, STATUS_STORED, location)
+                    else:  # we had it on a side branch
+                        self.store.set_location(block.block_id, location)
                     self._connect(block)
+                    added.append(block)
                 self.store.set_meta("sealed_chunks", str(chunk.index + 1))
         except ValidationError:
+            added = []
             if wrote_file:
                 self.store.files.delete_chunk(chunk.index)
             raise
-        for block in blocks:
+        for block in checked.blocks:
             self.store.files.delete_recent(block.height, block.block_id)
-        return len(new)
+        return added
 
     def _connect(self, block: Block) -> None:
         tip = self.tip.header

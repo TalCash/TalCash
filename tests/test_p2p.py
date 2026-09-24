@@ -31,8 +31,8 @@ def text(key) -> str:
 def nodes(tmp_path):
     started: list[LocalNode] = []
 
-    def make(name: str, peers: list[LocalNode] = (), start: bool = True) -> LocalNode:
-        node = LocalNode(name, tmp_path / name, PARAMS, list(peers))
+    def make(name: str, peers: list[LocalNode] = (), start: bool = True, params=PARAMS) -> LocalNode:
+        node = LocalNode(name, tmp_path / name, params, list(peers))
         started.append(node)
         return node.start() if start else node
 
@@ -91,11 +91,11 @@ def test_split_networks_rejoin_on_the_chain_with_more_work(nodes):
     a.mine(text(ALICE), 4)  # shared history: Alice has 10 TC spendable
     wait_until(lambda: b.height() == 4, "b to sync the shared history")
 
-    # Cut the network in two: restart both without peers.
+    # Cut the network in two: restart both without peers (and without their saved peer lists).
     a.stop()
     b.stop()
-    a.start(peers=[])
-    b.start(peers=[])
+    a.start(peers=[], forget_peers=True)
+    b.start(peers=[], forget_peers=True)
     to_carol = make_transfer(PARAMS, ALICE, 0, [(CAROL.address, 2_000_000)], fee=500)
     a.send(to_carol)
     a.mine(text(ALICE), 1)  # a's side: height 5, includes the payment
@@ -156,6 +156,60 @@ def test_bad_peers_are_disconnected_and_the_node_carries_on(nodes):
 
     assert a.height() == 2  # nothing got in, and the node still answers
     assert a.peer_count() == 0
+
+
+# Days of 5 blocks, final 10 deep: at height 60, days 0-9 (heights 0-49) are sealed chunk files.
+CHUNKY = replace(PARAMS, chunk_size=5, snapshot_delay=2, finality_depth=10)
+
+
+def test_a_late_node_catches_up_with_chunk_files(nodes):
+    a = nodes("a", params=CHUNKY)
+    a.mine(text(ALICE), 60)
+    assert a.status()["sealed_chunks"] == 10
+    late = nodes("late", peers=[a], params=CHUNKY)
+    wait_until(lambda: late.height() == 60 and same_tip(a, late), "the late node to catch up")
+    imported = [line for line in late.log if "imported chunk" in line]
+    assert len(imported) == 10  # heights 0-49 came as ten chunk files; 50-60 block by block
+    assert late.status()["sealed_chunks"] == 10
+    assert late.balance(text(ALICE)) == a.balance(text(ALICE))
+
+
+def test_a_damaged_chunk_gets_the_peer_dropped_and_another_peer_is_used(nodes, monkeypatch):
+    a = nodes("a", params=CHUNKY)
+    a.mine(text(ALICE), 60)
+    b = nodes("b", peers=[a], params=CHUNKY)
+    wait_until(lambda: b.height() == 60 and b.status()["sealed_chunks"] == 10, "b to catch up")
+
+    real_download, calls = p2p.download_chunk, []
+
+    async def first_download_damaged(http_base, index):
+        data = await real_download(http_base, index)
+        calls.append(http_base)
+        if len(calls) == 1:
+            data = data[:-1] + bytes([data[-1] ^ 1])  # break the checksum
+        return data
+
+    monkeypatch.setattr(p2p, "download_chunk", first_download_damaged)
+    late = nodes("late", peers=[a, b], params=CHUNKY)
+    wait_until(lambda: late.height() == 60 and same_tip(a, late), "the late node to catch up anyway")
+    assert any("damaged chunk" in line for line in late.log)
+    assert len({url for url in calls}) == 2  # it switched to the other peer
+    assert late.peer_count() == 1  # the peer that sent the damaged file stays disconnected
+
+
+def test_a_restarted_node_finds_the_network_again(nodes, tmp_path):
+    a = nodes("a")
+    b = nodes("b", peers=[a])
+    c = nodes("c", peers=[b])  # c only knows b; b tells it about a
+    wait_until(lambda: c.peer_count() == 2, "c to learn about a from b and connect to it")
+    c.stop()
+    saved = json.loads((tmp_path / "c" / "peers.json").read_text())
+    assert set(saved) == {a.p2p_url, b.p2p_url}
+
+    c.start(peers=[])  # no --peer this time
+    wait_until(lambda: c.peer_count() == 2, "c to reconnect to both from its saved list")
+    a.mine(text(ALICE), 2)
+    wait_until(lambda: c.height() == 2, "c to receive new blocks")
 
 
 def test_a_new_devnet_node_joins_an_existing_devnet(tmp_path):

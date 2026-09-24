@@ -50,13 +50,16 @@ class LocalNode:
     def p2p_url(self) -> str:
         return f"ws://127.0.0.1:{self.port}/v1/p2p"
 
-    def start(self, peers: list["LocalNode"] | None = None) -> "LocalNode":
+    def start(self, peers: list["LocalNode"] | None = None, forget_peers: bool = False) -> "LocalNode":
+        """`forget_peers` deletes the saved peer list (to really cut a node off)."""
         if peers is not None:
             self.peer_urls = [peer.p2p_url for peer in peers]
         self.folder.mkdir(parents=True, exist_ok=True)
+        if forget_peers:
+            (self.folder / "peers.json").unlink(missing_ok=True)
         app = create_app(
             lambda: NodeService(self.params, Store(self.folder / "chain.sqlite"), log=self.log.append),
-            p2p=P2PConfig(listen_url=self.p2p_url, connect=self.peer_urls),
+            p2p=P2PConfig(listen_url=self.p2p_url, connect=self.peer_urls, peers_file=self.folder / "peers.json"),
         )
         config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning",
                                 ws="websockets-sansio", ws_max_size=MAX_MESSAGE_BYTES)

@@ -16,7 +16,8 @@ Status of each part:
 | Node API (HTTP + WebSocket) | Implemented and tested |
 | Peer-to-peer: handshake, spreading blocks and transfers, catching up | Implemented and tested with several real nodes |
 | Block files and sealed chunk files, rebuild from files, reader | Implemented and tested (section 12) |
-| Chunk download during sync, mega chunks, fast sync, pruning | Planned (section 12) |
+| Catching up by downloading chunk files, remembered peers | Implemented and tested with several real nodes |
+| Mega chunks, fast sync from snapshots, pruning | Planned (section 12) |
 
 ---
 
@@ -288,8 +289,8 @@ mainnet, 60 on devnet).
 Chunk and mega-chunk roots are computed from block ids, so they are not consensus rules. More
 levels (a decade, all of history) can be added at any time without changing the protocol.
 
-**Syncing** today: headers after a block locator, then blocks in batches (section 16). Planned:
-download sealed chunk files over HTTP for old history. Eventually either:
+**Syncing** today (section 16): sealed chunk files downloaded from a peer and imported a whole day
+at a time, then the newer blocks by headers and batches. Planned on top of that, either:
 - **Full sync**: every chunk from genesis, applying every block.
 - **Fast sync**: the balances at the latest final snapshot (checked against the `snapshot_root` in
   the headers), the `coinbase_maturity` blocks ending at the snapshot (their rewards mature after
@@ -378,7 +379,7 @@ Nodes talk over WebSocket at `/v1/p2p` on the node's port, one JSON object per m
 
 | Message | Meaning |
 |---|---|
-| `hello` | first message both ways: protocol version, network, genesis id, random node id, height, total work, listen URL |
+| `hello` | first message both ways: protocol version, network, genesis id, random node id, height, total work, number of sealed chunks, listen URL |
 | `inv` | "I have these": block and/or transaction ids (at most 1,000) |
 | `get_data` | "send me these" |
 | `block`, `tx` | the data itself |
@@ -394,14 +395,22 @@ Nodes talk over WebSocket at `/v1/p2p` on the node's port, one JSON object per m
   after a chain switch) is announced by id to peers not known to have it; peers fetch what they
   lack. A newly connected peer is told about everything in the mempool.
 - **Catching up**: when a peer has more total work (from its hello), or sends a block whose parent
-  is missing, the node asks it for headers after its locator and downloads those blocks 64 at a
-  time, in order. One peer at a time; a peer that stalls for 30 seconds is dropped for another.
-- **Misbehaviour**: malformed or oversized messages, blocks that break a rule, or claiming blocks it
-  can't send get a peer disconnected. A block from slightly in the future or from a fork below our
-  finality is not treated as misbehaviour, but that peer isn't used for catching up.
+  is missing, the node catches up from it, one peer at a time:
+  1. **Whole days first**: if the peer has sealed chunks the node doesn't, it downloads them from the
+     peer's API (`GET /v1/chunks/{index}`, same port) one by one. Each is checked in a background
+     thread (file integrity, links, every proof of work) and then applied in one database
+     transaction with every rule checked (section 12).
+  2. **Then block by block**: headers after its locator, then those blocks 64 at a time, in order.
+
+  A chunk that doesn't continue the node's own chain, or that can't be downloaded, just means
+  going block by block. A peer that stalls for 30 seconds is dropped for another.
+- **Misbehaviour**: malformed or oversized messages, blocks that break a rule, damaged or invalid
+  chunk files, or claiming blocks it can't send get a peer disconnected. A peer that sent a bad chunk
+  is also refused, in both directions, for 10 minutes. A block from slightly in the future or from a
+  fork below our finality is not treated as misbehaviour, but that peer isn't used for catching up.
 - Each peer has its own send queue (5,000 messages); a peer that can't keep up is disconnected.
 - Nodes keep up to 8 outbound connections (`--peer` addresses first, then learned ones) and accept
-  up to 32 inbound.
+  up to 32 inbound. Addresses the node managed to connect to are saved in `peers.json` next to the
+  chain, so a restarted node reconnects without `--peer`.
 
-Planned: chunk files for fast bulk sync (section 12), remembering learned addresses across restarts,
-per-peer rate limits.
+Planned: per-peer rate limits.

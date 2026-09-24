@@ -17,7 +17,7 @@ from ..core.params import NetworkParams
 from ..core.tx import Coinbase, Transaction, Transfer
 from ..crypto.address import encode_address
 from ..paths import network_dir
-from .chain import ChainManager, SubmitResult
+from .chain import ChainManager, CheckedChunk, SubmitResult
 from .events import EventBus
 from .mempool import Mempool, MempoolEntry
 from .network import CHAIN_FILE
@@ -113,6 +113,20 @@ class NodeService:
             for listener in self.tx_listeners:
                 listener(tx, None)
         return result
+
+    def import_chunk(self, checked: CheckedChunk, *, origin: object = None) -> int:
+        """Add a whole checked chunk (a day of blocks) at once. Returns how many blocks were new."""
+        added = self.chain.apply_chunk(checked)
+        if added:
+            self.mempool.update(added, [])
+            self.tip_version += 1
+            last = added[-1]
+            self.log(f"{time.strftime('%H:%M:%S')}  imported chunk {checked.chunk.index}: {len(added)} blocks, "
+                     f"now at #{last.height}")
+            self._announce_block(last, "chunk", "", quiet=True)
+            for listener in self.tip_listeners:
+                listener(last, origin)
+        return len(added)
 
     def submit_transaction(self, tx: Transaction, *, origin: object = None) -> MempoolEntry:
         entry = self.mempool.add(tx)
