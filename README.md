@@ -28,6 +28,21 @@ docs/PROTOCOL.md     protocol specification
 Coming next: mempool and miner, then the node's HTTP/WebSocket API, peer-to-peer
 sync with chunks, and launch.
 
+## Try it: a local devnet
+
+Devnet is TechnoCoin on your own computer at 60x speed: one block per second, same rules and
+mining as mainnet.
+
+```
+python -m technocoin --network devnet wallet create
+python -m technocoin --network devnet node --mine
+```
+
+The node mines to your wallet's first address and prints every block: difficulty climbing as it
+adapts to your CPU, the chain settling at about one block per second, rewards unlocking after 100
+blocks. Stop it with Ctrl+C and start it again to continue the same chain; add `--reset` to throw
+the devnet away and start a fresh one. `--threads N` sets how many CPU cores mine.
+
 ## Wallet
 
 ```

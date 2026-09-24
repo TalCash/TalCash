@@ -1,7 +1,13 @@
-"""Network parameters. Everything that differs between mainnet, testnet and regtest lives here.
+"""Network parameters. Everything that differs between networks lives here.
 
-Mainnet and testnet genesis fields stay empty until those networks are launched;
-regtest is a private local chain for development and tests (instant mining).
+  mainnet  the real network
+  testnet  public test network, same rules as mainnet
+  devnet   local network for trying things on your own computer: 1-second blocks,
+           everything else like mainnet but 60x faster. Each devnet gets a fresh
+           genesis block when it is created (see node/network.py).
+  regtest  for automated tests only: instant blocks, difficulty never changes
+
+Mainnet and testnet genesis fields stay empty until those networks are launched.
 """
 
 from dataclasses import dataclass
@@ -81,6 +87,24 @@ TESTNET = NetworkParams(
     genesis_target=target_for(18_000),
 )
 
+# Mainnet's behaviour at 60x speed: one block per second, a one-minute ASERT half-life
+# (60 blocks, as on mainnet), one-minute chunks. Same Argon2id work as mainnet;
+# the genesis target is about one core-second.
+DEVNET = NetworkParams(
+    name="devnet",
+    network_id=4,
+    address_prefix="td",
+    default_port=64187,
+    pow=_ARGON2_MAINNET,
+    pow_limit=target_for(10),
+    genesis_target=target_for(300),
+    target_spacing=1,
+    asert_half_life=60,
+    chunk_size=60,
+    snapshot_delay=5,
+    max_future_drift=10,
+)
+
 REGTEST = NetworkParams(
     name="regtest",
     network_id=3,
@@ -96,4 +120,4 @@ REGTEST = NetworkParams(
     genesis_id=bytes.fromhex("f7b448d97f6e94aaeb2181aaa1f6d39a96de10c45f7ca60dca8245b46567ec14"),
 )
 
-NETWORKS = {params.name: params for params in (MAINNET, TESTNET, REGTEST)}
+NETWORKS = {params.name: params for params in (MAINNET, TESTNET, DEVNET, REGTEST)}

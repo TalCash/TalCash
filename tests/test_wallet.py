@@ -35,8 +35,11 @@ def test_create_and_reload(tmp_path):
 def test_the_file_never_contains_the_words(tmp_path):
     wallet, phrase = make(tmp_path)
     text = (tmp_path / "wallet.json").read_text()
-    for word in set(phrase.split()):
-        assert f'"{word}' not in text and f" {word} " not in text
+    # Single words can't be checked: "address", "index", "network" and "salt" are BIP39 words
+    # that also appear in the file's layout. Two consecutive words never would.
+    words = phrase.split()
+    for first, second in zip(words, words[1:]):
+        assert f"{first} {second}" not in text
     assert json.loads(text)["encrypted"]["kdf"] == "argon2id"
 
 

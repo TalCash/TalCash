@@ -5,8 +5,10 @@
     tc wallet addresses          list your addresses
     tc wallet new-address        add another address
     tc wallet show-passphrase    show your 24 words again
+    tc node --mine [ADDRESS]     run a local node and mine (to your wallet's first address by default)
 
-Global options: --network mainnet|testnet|regtest, --datadir DIR.
+Global options: --network mainnet|testnet|devnet|regtest, --datadir DIR.
+Try it locally: `tc --network devnet node --mine` (one block per second).
 Balance, send and history arrive with the node API.
 """
 
@@ -17,10 +19,17 @@ from pathlib import Path
 
 from . import paths
 from .core.params import NETWORKS, NetworkParams
+from .crypto.address import decode_address
+from .node.network import load_params, reset_devnet
+from .node.runner import LocalNode
 from .wallet.keystore import WrongPassword
 from .wallet.wallet import Wallet, WalletError
 
 MIN_PASSWORD_LENGTH = 8
+
+
+class CommandError(Exception):
+    pass
 
 
 def _wallet_path(args: argparse.Namespace) -> Path:
@@ -108,6 +117,32 @@ def cmd_show_passphrase(args: argparse.Namespace, params: NetworkParams) -> int:
     return 0
 
 
+def cmd_node(args: argparse.Namespace, params: NetworkParams) -> int:
+    base = Path(args.datadir) if args.datadir else None
+    if args.reset:
+        if params.name != "devnet":
+            raise CommandError("--reset only works on devnet")
+        for path in reset_devnet(base):
+            print(f"removed {path}")
+    params = load_params(params.name, base)
+    if args.mine is None:
+        raise CommandError("nothing to do yet: add --mine (the API and peer-to-peer sync come in the next steps)")
+    if args.mine == "wallet":
+        wallet = _load(args, params)
+        miner_text = wallet.addresses[0].address
+    else:
+        miner_text = args.mine
+    miner = decode_address(miner_text, params.address_prefix)
+
+    node = LocalNode(params, base)
+    print(node.describe(), flush=True)
+    try:
+        node.mine(miner, workers=args.threads, blocks=args.blocks)
+    finally:
+        node.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tc", description="TechnoCoin command line")
     parser.add_argument("--network", choices=sorted(NETWORKS), default="mainnet")
@@ -125,6 +160,15 @@ def build_parser() -> argparse.ArgumentParser:
         ("show-passphrase", cmd_show_passphrase, "show your 24 words"),
     ]:
         wallet_commands.add_parser(name, help=help_text).set_defaults(handler=handler)
+
+    node = commands.add_parser("node", help="run a local node")
+    node.add_argument("--mine", nargs="?", const="wallet", metavar="ADDRESS",
+                      help="mine, paying ADDRESS (default: your wallet's first address)")
+    node.add_argument("--threads", type=int, help="mining processes (default: one per CPU core)")
+    node.add_argument("--blocks", type=int, help="stop after mining this many blocks")
+    node.add_argument("--reset", action="store_true", help="devnet only: delete the chain and start a fresh devnet")
+    node.add_argument("--file", help=argparse.SUPPRESS)  # lets _load() find the wallet the same way as `tc wallet`
+    node.set_defaults(handler=cmd_node)
     return parser
 
 
@@ -132,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.handler(args, NETWORKS[args.network])
-    except (WalletError, WrongPassword, ValueError) as error:
+    except (CommandError, WalletError, WrongPassword, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

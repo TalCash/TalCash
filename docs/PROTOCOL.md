@@ -12,7 +12,7 @@ Status of each part:
 | Amounts, encoding, hashing, addresses, transactions, blocks, PoW, difficulty, state, balance snapshots | Implemented and tested |
 | Genesis | Implemented; mainnet/testnet genesis gets mined at launch |
 | Chain selection, reorganisation, finality | Implemented in `technocoin/node/chain.py` and tested |
-| Mempool policy | Planned (step 4) |
+| Mempool policy, block templates, miner | Implemented and tested |
 | Chunk files, mega chunks, fast sync, P2P, API | Planned (steps 5-6), outline only |
 
 ---
@@ -37,7 +37,7 @@ Status of each part:
 - **Address payload** (21 bytes, used inside transactions):
   `0x00 || H(public_key)[0:20]`. The first byte is the address version; only `0x00` is valid today.
 - **Text address**: `prefix || base58(payload || checksum)` with
-  `checksum = H(H(prefix || payload))[0:4]`. Prefixes: `tc` mainnet, `tt` testnet, `tr` regtest.
+  `checksum = H(H(prefix || payload))[0:4]`. Prefixes: `tc` mainnet, `tt` testnet, `td` devnet, `tr` regtest.
   The checksum covers the prefix, so an address from another network never validates.
   Because the version byte is zero, every address starts with `tc1`.
 - **Burn address**: payload of 21 zero bytes (`tc1111111111111111111115gbLbA`). No public key
@@ -56,7 +56,7 @@ Wallet key handling (not consensus, but every TechnoCoin wallet does it this way
 | Field | Encoding | Notes |
 |---|---|---|
 | version | u8 | `1` |
-| network_id | u8 | 1 mainnet, 2 testnet, 3 regtest |
+| network_id | u8 | 1 mainnet, 2 testnet, 3 regtest, 4 devnet |
 | type | u8 | `1` |
 | sender_public_key | 32 bytes | the sender is `payload(sender_public_key)` |
 | nonce | u64 | must equal the sender's count of earlier transfers |
@@ -136,7 +136,7 @@ transaction lists can never share a root.
 - Proof of work holds (section 6).
 
 Node rule, checked only when a block first arrives (not when replaying history):
-`timestamp ≤ local clock + 300 seconds`.
+`timestamp ≤ local clock + max_future_drift` (300 s; 10 s on devnet).
 
 ## 6. Proof of work
 
@@ -145,7 +145,7 @@ Node rule, checked only when a block first arrives (not when replaying history):
 
 | Network | Memory | Iterations |
 |---|---|---|
-| mainnet, testnet | 4 MiB | 1 |
+| mainnet, testnet, devnet | 4 MiB | 1 |
 | regtest | 8 KiB | 1 |
 
 At 4 MiB a CPU core computes about 300 hashes per second, and checking one block costs about 3 ms.
@@ -161,7 +161,8 @@ Every block's target is computed from its parent and the genesis block (the anch
 ```
 time_delta   = parent.timestamp − genesis.timestamp
 height_delta = parent.height − genesis.height
-exponent     = floor((time_delta − 60 × height_delta) × 65536 / half_life)      # half_life = 3600
+exponent     = floor((time_delta − spacing × height_delta) × 65536 / half_life)
+               # mainnet: spacing 60 s, half_life 3600 s; devnet: 1 s and 60 s
 shifts       = exponent >> 16                    # floor
 frac         = exponent − (shifts << 16)         # 0 ≤ frac < 65536
 if shifts > 256:  target = pow_limit
@@ -274,26 +275,47 @@ and snapshots. Archive nodes keep everything.
 
 ## 13. Networks
 
-| | mainnet | testnet | regtest |
-|---|---|---|---|
-| network_id | 1 | 2 | 3 |
-| address prefix | `tc` | `tt` | `tr` |
-| default port | 64184 | 64185 | 64186 |
-| block time | 60 s | 60 s | 60 s (no retarget) |
-| reward | 10 TC | 10 TC | 10 TC |
-| genesis target | ~18,000 hashes per block | same | ~2 hashes |
-| pow_limit (easiest) | ~600 hashes per block | same | ~2 hashes |
+| | mainnet | testnet | devnet | regtest |
+|---|---|---|---|---|
+| purpose | the real network | public rehearsal | your own computer | automated tests |
+| network_id | 1 | 2 | 4 | 3 |
+| address prefix | `tc` | `tt` | `td` | `tr` |
+| default port | 64184 | 64185 | 64187 | 64186 |
+| block time | 60 s | 60 s | **1 s** | (no retarget) |
+| ASERT half-life | 1 hour | 1 hour | 1 minute | none |
+| chunk | 1,440 blocks (a day) | same | 60 blocks (a minute) | 1,440 |
+| max future drift | 300 s | 300 s | 10 s | 300 s |
+| proof of work | Argon2id 4 MiB | same | same | Argon2id 8 KiB |
+| genesis target | ~18,000 hashes | same | ~300 hashes | ~2 hashes |
+| pow_limit (easiest) | ~600 hashes | same | ~10 hashes | ~2 hashes |
+| genesis | mined at launch | mined at launch | mined when a devnet is created | fixed |
 
-The genesis target is sized so that one CPU core finds the first blocks in about a minute. It will
-be revisited just before launch.
+Every network pays 10 TC per block, matures rewards after 100 blocks and finalizes 100 blocks deep.
+Devnet is mainnet at 60x speed: the same rules and mining work, and the same behaviour counted in
+blocks, so it shows how the real chain behaves in a few minutes. Each devnet mines its own genesis
+block when it is first started, stamped with the current time (difficulty is scheduled from
+genesis, so an old genesis would make a new devnet start far behind schedule).
 
-## 14. Node policy (planned, not consensus)
+The mainnet genesis target is sized so that one CPU core finds the first blocks in about a minute.
+It will be revisited just before launch.
 
-- Mempool: a transfer is accepted if it would be valid on top of the current tip plus the sender's
-  other pending transfers (consecutive nonces, enough balance for all of them).
-- Minimum relay fee per byte (spam protection; each node can change it without a fork). Consensus
-  allows a fee of 0, so miners may include their own transfers for free.
-- Miners fill blocks by fee per byte, highest first.
+## 14. Node policy (not consensus)
+
+Each node chooses these; changing them never splits the network. Defaults:
+
+- A transfer enters the mempool only if it would be valid on top of the current tip plus the
+  sender's other waiting transfers: consecutive nonces, and a **confirmed** balance that covers all
+  of them. (Coins received but not yet in a block can't be spent yet.)
+- Minimum fee: 1 base unit per byte (0.000146 TC for a simple payment). Set to 0 to relay free
+  transfers. Consensus allows a fee of 0, so a miner can always include its own transfers for free.
+- A waiting transfer can be replaced by one with the same sender and nonce paying at least 25% more
+  per byte.
+- Limits: 50 MB of waiting transfers, 64 per sender, 14 days before an unmined transfer is dropped.
+  When full, the lowest fee per byte leaves first (only a sender's last transfer can leave, so no
+  nonce gaps appear).
+- After blocks are undone in a chain switch, their transfers return to the mempool if still valid.
+- Miners take transfers by fee per byte, highest first, keeping each sender's nonce order, up to
+  the block size limit.
 
 ## 15. Networking and API (planned)
 
