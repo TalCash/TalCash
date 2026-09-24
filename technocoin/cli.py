@@ -10,6 +10,7 @@
     tc wallet history                recent transactions
     tc node [--mine [ADDRESS]] [--peer URL ...]   run a node, optionally mining (to your wallet by default)
     tc devnet [--nodes 3] [--miners 2]            a whole local network of devnet nodes
+    tc read FILE [--blocks]          show a block file or chunk file as JSON (and check it)
 
 Global options: --network mainnet|testnet|devnet|regtest, --datadir DIR.
 Wallet commands that need a node use --node URL (default: this computer).
@@ -18,18 +19,26 @@ Try it locally: `tc --network devnet node --mine` (one block per second).
 
 import argparse
 import getpass
+import json
 import sys
 import time
 from pathlib import Path
 
 from . import paths
 from .core.amounts import format_amount, parse_amount
+from .core.block import block_from_bytes
+from .core.errors import DecodeError
 from .core.params import NETWORKS, NetworkParams
 from .core.tx import MAX_MEMO_SIZE, MAX_OUTPUTS, Output, Transfer
 from .crypto.address import decode_address
 from .devnet import run_devnet
+from .node.blockfiles import MAGIC as CHUNK_MAGIC
+from .node.blockfiles import decode_chunk
 from .node.network import has_devnet, join_devnet, load_params, reset_devnet
+from .node.reindex import reindex
 from .node.server import run_node
+from .node.views import block_contents_view
+from .paths import network_dir
 from .wallet.client import NodeClient, NodeError
 from .wallet.keystore import WrongPassword
 from .wallet.wallet import Wallet, WalletError
@@ -269,12 +278,53 @@ def cmd_node(args: argparse.Namespace, params: NetworkParams) -> int:
     if params.name == "devnet" and not has_devnet(base) and args.peer:
         join_devnet(args.peer[0], base)  # join that devnet instead of starting a new one
     params = load_params(params.name, base)
+    if args.reindex:
+        reindex(params, network_dir(params.name, base))
     miner = None
     if args.mine is not None:
         text = _load(args, params).addresses[0].address if args.mine == "wallet" else args.mine
         miner = decode_address(text, params.address_prefix)
     run_node(params, base, host=args.host, port=args.port, miner=miner, workers=args.threads,
              blocks=args.blocks, min_fee_per_byte=args.min_fee, peers=args.peer, public_url=args.public_url)
+    return 0
+
+
+def cmd_read(args: argparse.Namespace, params: NetworkParams) -> int:
+    """Show a block file or chunk file as JSON, after checking it."""
+    path = Path(args.path)
+    data = path.read_bytes()
+    by_id = {p.network_id: p for p in NETWORKS.values()}
+    if data.startswith(CHUNK_MAGIC):
+        chunk = decode_chunk(data)  # raises if the file is damaged or altered
+        network = by_id.get(chunk.network_id)
+        if network is None:
+            raise CommandError(f"unknown network id {chunk.network_id}")
+        blocks = [block_from_bytes(b) for b in chunk.blocks]
+        info = {
+            "file": str(path),
+            "type": "chunk",
+            "network": network.name,
+            "chunk": chunk.index,
+            "heights": [blocks[0].height, blocks[-1].height],
+            "blocks": len(blocks),
+            "transfers": sum(len(b.transactions) - 1 for b in blocks),
+            "file_size": len(data),
+            "uncompressed_size": sum(len(b) for b in chunk.blocks),
+            "chunk_root": chunk.root.hex(),
+            "verified": "checksum, chunk root and block links all OK",
+        }
+        if args.blocks:
+            info["block_list"] = [block_contents_view(b, network) for b in blocks]
+        print(json.dumps(info, indent=2))
+        return 0
+    try:
+        block = block_from_bytes(data)
+    except DecodeError:
+        raise CommandError(f"{path} is neither a block file nor a chunk file") from None
+    network = by_id.get(block.coinbase.network_id) if block.transactions else None
+    if network is None:
+        raise CommandError("unknown network in this block")
+    print(json.dumps({"file": str(path), "type": "block", **block_contents_view(block, network)}, indent=2))
     return 0
 
 
@@ -339,6 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="another node to connect to, e.g. ws://127.0.0.1:64188/v1/p2p (repeatable)")
     node.add_argument("--public-url", metavar="URL", help="how other nodes can reach this one (ws://host:port/v1/p2p)")
     node.add_argument("--reset", action="store_true", help="devnet only: delete the chain and start a fresh devnet")
+    node.add_argument("--reindex", action="store_true", help="rebuild the database from the block files first")
     node.add_argument("--file", help=argparse.SUPPRESS)  # lets _load() find the wallet the same way as `tc wallet`
     node.set_defaults(handler=cmd_node)
 
@@ -351,6 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
     devnet.add_argument("--seconds", type=float, help="stop after this many seconds")
     devnet.add_argument("--reset", action="store_true", help="start a brand-new devnet")
     devnet.set_defaults(handler=cmd_devnet)
+
+    read = commands.add_parser("read", help="show a block file or chunk file as JSON (and check it)")
+    read.add_argument("path", help="a .block or .chunk file (in <datadir>/<network>/blocks/)")
+    read.add_argument("--blocks", action="store_true", help="for a chunk file: include every block")
+    read.set_defaults(handler=cmd_read)
     return parser
 
 

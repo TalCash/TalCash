@@ -10,6 +10,8 @@
     GET  /v1/mining/template?address=    a block to mine
     POST /v1/mining/submit               {"hex": ...} a mined block
     GET  /v1/peers                       connected nodes
+    GET  /v1/chunks/{index}              a sealed chunk file (one day of blocks), byte for byte
+    GET  /v1/genesis                     the genesis block's parameters (devnet nodes join with it)
     WS   /v1/ws                          send {"subscribe": ["blocks", "mempool", "address:<addr>"]}
     WS   /v1/p2p                         node-to-node protocol (see p2p.py)
 
@@ -24,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import FastAPI, Query, Request, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from .. import __version__
@@ -130,6 +132,7 @@ def create_app(
             "height": tip.height,
             "tip": block_summary(service, tip),
             "finalized_height": service.chain.finalized_height(),
+            "sealed_chunks": service.store.sealed_chunks(),
             "target_spacing": params.target_spacing,
             "block_reward": amount(params.block_reward),
             "coinbase_maturity": params.coinbase_maturity,
@@ -138,6 +141,17 @@ def create_app(
             "mempool": {"count": len(service.mempool), "bytes": service.mempool.size_bytes},
             "peers": len(request.app.state.peers.ready_peers) if request.app.state.peers else 0,
         }
+
+    @app.get("/v1/chunks/{index}")
+    async def chunk_file(index: int, request: Request) -> Response:
+        """A sealed chunk file, byte for byte (see blockfiles.py for the format)."""
+        service = service_of(request)
+        if not 0 <= index < service.store.sealed_chunks():
+            raise ApiError(404, "unknown-chunk", "not sealed yet (or no such chunk)")
+        path = service.store.files.chunk_path(index)
+        if path is not None:
+            return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+        return Response(service.store.files.chunk_bytes(index), media_type="application/octet-stream")
 
     @app.get("/v1/genesis")
     async def genesis(request: Request) -> dict:

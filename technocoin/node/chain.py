@@ -19,10 +19,14 @@ Finality: the node never accepts a block that forks off more than
 
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ..core.block import Block, BlockHeader, check_block
+from ..core.block import Block, BlockHeader, block_from_bytes, check_block
+from ..core.errors import DecodeError
+from ..core.pow import meets_target
+from .blockfiles import decode_chunk
 from ..core.difficulty import block_work, median_time_past, next_target
 from ..core.errors import ValidationError
 from ..core.genesis import genesis_block
@@ -79,6 +83,9 @@ class ChainManager:
                 self.store.index_block(self.genesis)
         elif stored != self.genesis.block_id or self.store.meta("network") != self.params.name:
             raise RuntimeError(f"{self.store.path} belongs to a different network or genesis block")
+        # Finish anything a crash interrupted while sealing chunks.
+        self._seal_ready_chunks()
+        self.store.tidy_recent_files(self.sealed_height())
 
     # --- reading ------------------------------------------------------------
 
@@ -100,8 +107,12 @@ class ChainManager:
         return self.store.get_account(address)
 
     def finalized_height(self) -> int:
-        """Blocks at or below this height can never be undone."""
-        return max(0, self.tip_height - self.params.finality_depth)
+        """Blocks at or below this height can never be undone (sealed chunks are always final)."""
+        return max(0, self.tip_height - self.params.finality_depth, self.sealed_height())
+
+    def sealed_height(self) -> int:
+        """Height of the last block in a sealed chunk file (-1 before the first chunk is sealed)."""
+        return self.store.sealed_chunks() * self.params.chunk_size - 1
 
     def is_on_main_chain(self, block_id: bytes) -> bool:
         stored = self.store.header(block_id)
@@ -290,7 +301,66 @@ class ChainManager:
             with self.store.transaction():
                 self._mark_invalid(failure.block_id)
             return SubmitResult(Outcome.INVALID, new_tip_id, failure.error)
+        self._seal_ready_chunks()
         return SubmitResult(Outcome.NEW_TIP, new_tip_id, connected=connected, disconnected=disconnected)
+
+    # --- chunk files ------------------------------------------------------------
+
+    def _seal_ready_chunks(self) -> None:
+        """Seal every chunk whose last block is now final into a chunk file."""
+        size = self.params.chunk_size
+        while True:
+            index = self.store.sealed_chunks()
+            last = (index + 1) * size - 1
+            if last > self.tip_height - self.params.finality_depth:
+                return
+            self.store.seal_chunk(self.params.network_id, index, index * size, last)
+
+    def import_chunk(self, data: bytes) -> int:
+        """Add a whole sealed chunk (from our own files, or later from a peer) that continues the
+        active chain. One database transaction for the whole chunk, proof of work checked on all
+        cores. Every rule is still checked. Returns how many new blocks were added."""
+        chunk = decode_chunk(data)  # raises ChunkError if damaged
+        params, size = self.params, self.params.chunk_size
+        if chunk.network_id != params.network_id:
+            raise ValidationError("wrong-network", "chunk is from another network")
+        if chunk.index != self.store.sealed_chunks():
+            raise ValidationError("bad-chunk", f"expected chunk {self.store.sealed_chunks()}, got {chunk.index}")
+        if chunk.first_height != chunk.index * size or len(chunk.blocks) != size:
+            raise ValidationError("bad-chunk", "a chunk holds exactly one full day of blocks")
+        try:
+            blocks = [block_from_bytes(b) for b in chunk.blocks]
+        except DecodeError as error:
+            raise ValidationError("bad-chunk", f"unreadable block: {error}") from None
+
+        new = [b for b in blocks if not self.is_on_main_chain(b.block_id)]
+        with ThreadPoolExecutor() as pool:  # Argon2 releases the GIL, so threads really run in parallel
+            if not all(pool.map(lambda b: meets_target(b.header, params.pow), new)):
+                raise ValidationError("bad-pow", "a block in the chunk has invalid proof of work")
+
+        wrote_file = not self.store.files.has_chunk(chunk.index)
+        if wrote_file:
+            self.store.files.save_chunk_bytes(chunk.index, data)
+        try:
+            with self.store.transaction():
+                for block, location in zip(blocks, chunk.locations):
+                    if self.is_on_main_chain(block.block_id):
+                        self.store.set_location(block.block_id, location)
+                        continue
+                    tip = self.tip
+                    if block.header.prev_id != tip.block_id:
+                        raise ValidationError("bad-chunk", "chunk doesn't continue the active chain")
+                    work = tip.chain_work + block_work(block.header.target)
+                    self.store.add_block(block, work, STATUS_STORED, location)
+                    self._connect(block)
+                self.store.set_meta("sealed_chunks", str(chunk.index + 1))
+        except ValidationError:
+            if wrote_file:
+                self.store.files.delete_chunk(chunk.index)
+            raise
+        for block in blocks:
+            self.store.files.delete_recent(block.height, block.block_id)
+        return len(new)
 
     def _connect(self, block: Block) -> None:
         tip = self.tip.header

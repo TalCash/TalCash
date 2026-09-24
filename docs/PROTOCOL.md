@@ -15,7 +15,8 @@ Status of each part:
 | Mempool policy, block templates, miner | Implemented and tested |
 | Node API (HTTP + WebSocket) | Implemented and tested |
 | Peer-to-peer: handshake, spreading blocks and transfers, catching up | Implemented and tested with several real nodes |
-| Chunk files, mega chunks, fast sync, pruning | Planned, outline only (section 12) |
+| Block files and sealed chunk files, rebuild from files, reader | Implemented and tested (section 12) |
+| Chunk download during sync, mega chunks, fast sync, pruning | Planned (section 12) |
 
 ---
 
@@ -247,14 +248,36 @@ chosen at launch.
   is final. (A node isolated on a different chain for longer than that needs manual repair; the
   gain is that nobody can rewrite deep history, even with a burst of mining power.)
 
-## 12. Chunks, mega chunks and syncing (planned)
+## 12. Block files, chunks, mega chunks and syncing
 
-**Chunk** (one day): heights `k × 1440` to `k × 1440 + 1439`.
-- Sealed once its last block is final. Stored as one compressed file holding its blocks and
-  full transaction list.
+**Block files are the permanent record.** A node's database is only an index plus balances; it can
+always be rebuilt from the files (`tc node --reindex`), and copying the `blocks` folder to another
+machine copies the chain.
+
+```
+blocks/recent/<height>-<block id>.block   one block not yet sealed (any branch), its exact bytes
+blocks/chunks/<index>.chunk               a sealed chunk: one day of final blocks
+```
+
+Files are written once and never changed. A recent file is deleted once its block is sealed into a
+chunk (or, for a losing branch, once its height is final).
+
+**Chunk** (one day): heights `k × chunk_size` to `k × chunk_size + chunk_size − 1` (1,440 blocks on
+mainnet, 60 on devnet).
+- Sealed once its last block is final (100 blocks deep); from then on it is final even for a node
+  that has just rebuilt its database.
 - `chunk_root` = RFC 6962 merkle root of the chunk's block ids.
-- Chunk files are the unit of syncing: small enough to fetch from many peers in parallel, check one
-  by one and resume after a dropped connection.
+- File layout (integers big-endian):
+  `"TCCHUNK1" | network_id u8 | chunk index u32 | first height u64 | block count u32 | chunk_root 32
+  | segment count u32 | segment table (offset u64, length u32 each) | segments | SHA-256 of all before`.
+  Each segment is zlib-compressed and holds up to 64 blocks as `(length u32, block bytes)`. Grouping
+  64 blocks keeps the file at about 40% of the raw size, while reading one block unpacks only its group.
+- A chunk file is checked completely when read: checksum, structure, chunk root, and every block
+  linking to the one before. Importing it then applies every consensus rule to every block, in one
+  database transaction, with proof of work checked on all CPU cores: about 1.3 ms per block
+  (a year of mainnet in about 12 minutes), against about 10 ms per block one at a time.
+- Nodes serve sealed chunk files at `GET /v1/chunks/{index}`. `tc read FILE` prints any block or
+  chunk file as JSON after checking it.
 
 **Mega chunk** (about a year): chunks `m × 365` to `m × 365 + 364`.
 - `mega_root` = RFC 6962 merkle root of its 365 chunk roots: one hash that fingerprints a year, and
@@ -265,8 +288,8 @@ chosen at launch.
 Chunk and mega-chunk roots are computed from block ids, so they are not consensus rules. More
 levels (a decade, all of history) can be added at any time without changing the protocol.
 
-**Syncing** starts with headers: 156 bytes per block, checked for links, targets and proof of work,
-so the node knows the chain with the most work before downloading any blocks. Then either:
+**Syncing** today: headers after a block locator, then blocks in batches (section 16). Planned:
+download sealed chunk files over HTTP for old history. Eventually either:
 - **Full sync**: every chunk from genesis, applying every block.
 - **Fast sync**: the balances at the latest final snapshot (checked against the `snapshot_root` in
   the headers), the `coinbase_maturity` blocks ending at the snapshot (their rewards mature after

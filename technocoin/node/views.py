@@ -41,6 +41,8 @@ def tx_view(tx: Transaction, params: NetworkParams) -> dict:
         "outputs": [{"address": encode_address(o.address, prefix), "amount": amount(o.amount)} for o in tx.outputs],
         "memo": memo_text(tx.memo),
         "size": tx.size,
+        "public_key": tx.sender_public_key.hex(),
+        "signature": tx.signature.hex(),
     }
 
 
@@ -58,11 +60,13 @@ def header_view(header: BlockHeader, params: NetworkParams) -> dict:
     }
 
 
-def block_view(block: Block, params: NetworkParams, *, on_main_chain: bool, confirmations: int) -> dict:
+def block_contents_view(block: Block, params: NetworkParams) -> dict:
     return {
         **header_view(block.header, params),
         "size": block.size,
-        "on_main_chain": on_main_chain,
-        "confirmations": confirmations,
         "transactions": [tx_view(tx, params) for tx in block.transactions],
     }
+
+
+def block_view(block: Block, params: NetworkParams, *, on_main_chain: bool, confirmations: int) -> dict:
+    return {**block_contents_view(block, params), "on_main_chain": on_main_chain, "confirmations": confirmations}

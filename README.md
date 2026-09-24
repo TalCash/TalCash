@@ -19,7 +19,7 @@ The full rules are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 technocoin/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
 technocoin/crypto/   keys, passphrases, addresses
 technocoin/wallet/   encrypted wallet file, node client
-technocoin/node/     chain (SQLite, branches, finality), mempool, API server, peer-to-peer, built-in miner
+technocoin/node/     block files, chain (SQLite index, branches, finality), mempool, API, peer-to-peer, miner
 technocoin/miner/    multi-core Argon2id miner
 technocoin/devnet.py `tc devnet`: several local nodes at once
 technocoin/cli.py    the `tc` command
@@ -27,7 +27,7 @@ tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
 
-Coming next: hardening, chunk files for fast sync, a public testnet, then launch.
+Coming next: downloading chunk files during sync, hardening, a public testnet, then launch.
 
 ## Try it: a local devnet
 
@@ -70,6 +70,19 @@ devnet wallet if you have one. Wallet commands talk to the first node by default
 
 To connect nodes by hand: `tc node --peer ws://HOST:PORT/v1/p2p` (repeatable). A new devnet node
 started with `--peer` joins that devnet instead of creating its own.
+
+## Block files
+
+Every node keeps the chain as files: `~/.technocoin/<network>/blocks/chunks/*.chunk` (one file per
+sealed day, compressed) and `blocks/recent/*.block` (newer blocks, one file each). The database next
+to them is only an index plus balances and can always be rebuilt:
+
+```
+python -m technocoin --network devnet node --reindex      # rebuild the database from the files
+python -m technocoin read <file>.chunk [--blocks]         # check a file and show it as JSON
+```
+
+Copy the `blocks` folder to another machine and `--reindex` there gives it the whole chain.
 
 ## Wallet
 

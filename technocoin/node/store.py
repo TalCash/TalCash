@@ -1,8 +1,11 @@
 """SQLite storage for one node.
 
+Blocks themselves live in block files (blockfiles.py); the database only
+records where each one is. Everything here can be rebuilt from those files.
+
 Tables
-  headers        every block the node has stored, on any branch, with its total chain work
-  block_data     the full bytes of those blocks
+  headers        every block the node has stored, on any branch: header, total chain work,
+                 and where its bytes are (a recent block file, or a position in a chunk file)
   main_chain     height -> block id, for the active chain
   accounts       balances and nonces at the tip of the active chain
   undo           for each block on the active chain: the account values before it
@@ -25,8 +28,9 @@ from pathlib import Path
 from ..core.block import Block, BlockHeader, block_from_bytes, header_from_bytes
 from ..core.state import EMPTY_ACCOUNT, Account
 from ..core.tx import Coinbase, Transfer
+from .blockfiles import BlockFiles, ChunkLocation
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 STATUS_STORED = 0  # checked on arrival, not yet connected to the active chain
 STATUS_VALID = 1  # has been fully validated (connected at least once)
@@ -42,10 +46,14 @@ CREATE TABLE IF NOT EXISTS headers (
     height     INTEGER NOT NULL,
     header     BLOB NOT NULL,
     chain_work BLOB NOT NULL,
-    status     INTEGER NOT NULL
+    status     INTEGER NOT NULL,
+    chunk      INTEGER,  -- NULL: the block is in its own recent file
+    segment_offset INTEGER,
+    segment_length INTEGER,
+    position   INTEGER
 );
 CREATE INDEX IF NOT EXISTS headers_by_prev ON headers(prev_id);
-CREATE TABLE IF NOT EXISTS block_data (block_id BLOB PRIMARY KEY, data BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS headers_by_height ON headers(height);
 CREATE TABLE IF NOT EXISTS main_chain (height INTEGER PRIMARY KEY, block_id BLOB NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS accounts (address BLOB PRIMARY KEY, balance INTEGER NOT NULL, nonce INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS undo (block_id BLOB PRIMARY KEY, data BLOB NOT NULL);
@@ -83,17 +91,24 @@ class TxLocation:
 
 
 class Store:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, blocks_dir: Path | None = None) -> None:
+        """`blocks_dir` defaults to a `blocks` folder next to the database (kept in memory for ":memory:")."""
         self.path = str(path)
+        if self.path == ":memory:":
+            self.files = BlockFiles(blocks_dir)
+        else:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.files = BlockFiles(blocks_dir or Path(self.path).parent / "blocks")
         self._db = sqlite3.connect(self.path, isolation_level=None)
         if self.path != ":memory:":
             self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.executescript(_SCHEMA)
         self._in_transaction = False
-        if self.meta("schema_version") is None:
+        self._db.executescript(_SCHEMA)
+        version = self.meta("schema_version")
+        if version is None:
             self.set_meta("schema_version", str(SCHEMA_VERSION))
-        elif self.meta("schema_version") != str(SCHEMA_VERSION):
-            raise RuntimeError(f"{self.path} uses an unsupported database schema")
+        elif version != str(SCHEMA_VERSION):
+            raise RuntimeError(f"{self.path} is from an older version; rebuild it with `tc node --reindex`")
 
     def close(self) -> None:
         self._db.close()
@@ -129,14 +144,26 @@ class Store:
 
     # --- headers and blocks -------------------------------------------------
 
-    def add_block(self, block: Block, chain_work: int, status: int) -> None:
+    def add_block(self, block: Block, chain_work: int, status: int, location: ChunkLocation | None = None) -> None:
+        """Record a block. Without `location`, its bytes go into a new recent block file."""
         header = block.header
+        if location is None:
+            self.files.write_recent(block)
+            where = (None, None, None, None)
+        else:
+            where = (location.chunk, location.segment_offset, location.segment_length, location.position)
         self._db.execute(
-            "INSERT INTO headers (block_id, prev_id, height, header, chain_work, status) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO headers (block_id, prev_id, height, header, chain_work, status,"
+            " chunk, segment_offset, segment_length, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (header.block_id, header.prev_id, header.height, header.serialize(),
-             chain_work.to_bytes(_WORK_BYTES, "big"), status),
+             chain_work.to_bytes(_WORK_BYTES, "big"), status, *where),
         )
-        self._db.execute("INSERT INTO block_data (block_id, data) VALUES (?, ?)", (header.block_id, block.serialize()))
+
+    def set_location(self, block_id: bytes, location: ChunkLocation) -> None:
+        self._db.execute(
+            "UPDATE headers SET chunk = ?, segment_offset = ?, segment_length = ?, position = ? WHERE block_id = ?",
+            (location.chunk, location.segment_offset, location.segment_length, location.position, block_id),
+        )
 
     def header(self, block_id: bytes) -> StoredHeader | None:
         row = self._one("SELECT header, chain_work, status FROM headers WHERE block_id = ?", (block_id,))
@@ -144,9 +171,57 @@ class Store:
             return None
         return StoredHeader(header_from_bytes(row[0]), int.from_bytes(row[1], "big"), row[2])
 
+    def block_bytes(self, block_id: bytes) -> bytes | None:
+        row = self._one(
+            "SELECT height, chunk, segment_offset, segment_length, position FROM headers WHERE block_id = ?",
+            (block_id,),
+        )
+        if row is None:
+            return None
+        height, chunk, offset, length, position = row
+        if chunk is None:
+            return self.files.read_recent(height, block_id)
+        return self.files.read_from_chunk(ChunkLocation(chunk, offset, length, position))
+
     def block(self, block_id: bytes) -> Block | None:
-        row = self._one("SELECT data FROM block_data WHERE block_id = ?", (block_id,))
-        return block_from_bytes(row[0]) if row else None
+        data = self.block_bytes(block_id)
+        return block_from_bytes(data) if data is not None else None
+
+    # --- sealing chunks ---------------------------------------------------------
+
+    def sealed_chunks(self) -> int:
+        return int(self.meta("sealed_chunks") or 0)
+
+    def seal_chunk(self, network_id: int, index: int, first_height: int, last_height: int) -> None:
+        """Write one chunk file of the active chain's blocks first..last, then point the index at it.
+
+        Safe to repeat after a crash at any point: the chunk file is rewritten identically, and recent
+        files are only deleted once the database says their blocks are in the chunk.
+        """
+        ids = [self.main_id(height) for height in range(first_height, last_height + 1)]
+        locations = self.files.write_chunk(network_id, index, first_height, [self.block_bytes(i) for i in ids])
+        losers = self._db.execute(
+            "SELECT height, block_id FROM headers WHERE height BETWEEN ? AND ?"
+            " AND block_id NOT IN (SELECT block_id FROM main_chain)",
+            (first_height, last_height),
+        ).fetchall()
+        with self.transaction():
+            for block_id, location in zip(ids, locations):
+                self.set_location(block_id, location)
+            for _, block_id in losers:  # branches that lost; below finality they can never win
+                self._db.execute("DELETE FROM headers WHERE block_id = ?", (block_id,))
+            self.set_meta("sealed_chunks", str(index + 1))
+        for height, block_id in [*zip(range(first_height, last_height + 1), ids), *losers]:
+            self.files.delete_recent(height, block_id)
+
+    def tidy_recent_files(self, last_sealed_height: int) -> None:
+        """Remove recent files a crash left behind while sealing."""
+        for height, block_id in self.files.recent_blocks():
+            if height > last_sealed_height:
+                break
+            row = self._one("SELECT chunk FROM headers WHERE block_id = ?", (block_id,))
+            if row is None or row[0] is not None:
+                self.files.delete_recent(height, block_id)
 
     def set_status(self, block_id: bytes, status: int) -> None:
         self._db.execute("UPDATE headers SET status = ? WHERE block_id = ?", (status, block_id))
