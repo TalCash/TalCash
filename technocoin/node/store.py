@@ -243,6 +243,12 @@ class Store:
         row = self._one("SELECT block_id, height, position FROM tx_index WHERE txid = ?", (txid,))
         return TxLocation(*row) if row else None
 
+    def coinbase_heights(self, address: bytes, above: int) -> list[int]:
+        """Heights above `above` whose coinbase (always position 0) pays `address`."""
+        return [row[0] for row in self._db.execute(
+            "SELECT height FROM address_index WHERE address = ? AND position = 0 AND height > ?", (address, above)
+        )]
+
     def address_history(self, address: bytes, limit: int = 100) -> list[tuple[int, int, bytes]]:
         """(height, position, txid), newest first."""
         return self._db.execute(

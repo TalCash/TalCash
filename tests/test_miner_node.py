@@ -1,5 +1,6 @@
 """The multi-process miner, devnet creation, and a local node mining for real."""
 
+import asyncio
 from dataclasses import replace
 
 import pytest
@@ -12,7 +13,8 @@ from technocoin.crypto.address import encode_address
 from technocoin.miner.engine import Miner
 from technocoin.node.chain import ChainManager
 from technocoin.node.network import GENESIS_FILE, load_params, reset_devnet
-from technocoin.node.runner import LocalNode
+from technocoin.node.server import mining_loop
+from technocoin.node.service import NodeService
 from technocoin.node.store import Store
 from technocoin.wallet.keystore import INSECURE_FAST
 from technocoin.wallet.wallet import Wallet
@@ -55,19 +57,20 @@ def test_devnet_gets_its_own_genesis(tmp_path):
     assert load_params("mainnet", tmp_path) is MAINNET
 
 
-def test_local_node_mines_blocks(tmp_path):
+def test_mining_loop_mines_blocks():
     lines = []
-    node = LocalNode(REGTEST, tmp_path, log=lines.append)
-    node.mine(MINER.address, workers=2, blocks=3)
-    assert node.chain.tip_height == 3
-    assert sum(line.count(" #") for line in lines) == 3
-    node.close()
+    service = NodeService(REGTEST, Store(":memory:"), log=lines.append)
+    asyncio.run(mining_loop(service, MINER.address, workers=2, blocks=3))
+    assert service.chain.tip_height == 3
+    assert sum("[mined" in line for line in lines) == 3
+    service.close()
 
 
 def test_cli_node_command(tmp_path, capsys):
+    """Runs the real node: API server plus miner, stopping after two blocks."""
     address = encode_address(MINER.address, REGTEST.address_prefix)
     args = ["--network", "regtest", "--datadir", str(tmp_path), "node", "--mine", address,
-            "--blocks", "2", "--threads", "2"]
+            "--blocks", "2", "--threads", "2", "--port", "0"]
     assert main(args) == 0
     assert "#2 " in capsys.readouterr().out
     assert main(args) == 0  # restarting continues the same chain
@@ -77,6 +80,7 @@ def test_cli_node_command(tmp_path, capsys):
 
 def test_cli_mines_to_the_wallet_by_default(tmp_path, capsys):
     wallet, _ = Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, "password1", strength=INSECURE_FAST)
-    args = ["--network", "regtest", "--datadir", str(tmp_path), "node", "--mine", "--blocks", "1", "--threads", "1"]
+    args = ["--network", "regtest", "--datadir", str(tmp_path), "node", "--mine", "--blocks", "1", "--threads", "1",
+            "--port", "0"]
     assert main(args) == 0
     assert f"paying {wallet.addresses[0].address}" in capsys.readouterr().out

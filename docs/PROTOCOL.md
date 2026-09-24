@@ -13,7 +13,8 @@ Status of each part:
 | Genesis | Implemented; mainnet/testnet genesis gets mined at launch |
 | Chain selection, reorganisation, finality | Implemented in `technocoin/node/chain.py` and tested |
 | Mempool policy, block templates, miner | Implemented and tested |
-| Chunk files, mega chunks, fast sync, P2P, API | Planned (steps 5-6), outline only |
+| Node API (HTTP + WebSocket) | Implemented and tested |
+| Chunk files, mega chunks, fast sync, P2P | Planned (step 6), outline only |
 
 ---
 
@@ -317,9 +318,39 @@ Each node chooses these; changing them never splits the network. Defaults:
 - Miners take transfers by fee per byte, highest first, keeping each sender's nonce order, up to
   the block size limit.
 
-## 15. Networking and API (planned)
+## 15. Node API (version 1)
 
-- One server per node, one port: HTTP JSON API for requests, WebSocket for live events and for
-  node-to-node gossip.
-- Node handshake exchanges network id, genesis id, height and total work. Every message has a
-  request id, a size limit and a checked schema; misbehaving peers are disconnected.
+One server per node, one port (the network's default port), listening on this computer only unless
+told otherwise. Interactive documentation is served at `/docs`.
+
+- Amounts are strings in TC with all 6 decimals (`"12.500000"`), so no client ever rounds them.
+  Ids are lowercase hex; addresses are in text form.
+- Errors: `{"error": code, "detail": text}` with a 4xx status. Codes are the validation codes of
+  this document (`insufficient-funds`, `nonce-gap`, `bad-signature`, ...) plus `bad-hex`,
+  `bad-encoding`, `bad-address`, `unknown-block`, `unknown-transaction`, `too-large`.
+
+| Endpoint | |
+|---|---|
+| `GET /v1/status` | network, genesis, height, tip, difficulty, reward, minimum fee, mempool size |
+| `GET /v1/blocks/{height or id}` | a block with its transactions; `?format=hex` for raw bytes |
+| `GET /v1/tx/{txid}` | a transaction, `pending` or `confirmed` (height, confirmations) |
+| `POST /v1/tx` | `{"hex": ...}` submit a signed transfer |
+| `GET /v1/mempool` | waiting transfers |
+| `GET /v1/address/{address}` | `balance`, `available` (balance minus waiting spends), `pending_in`, `pending_out`, `immature` (unlocking rewards), `nonce`, `next_nonce` |
+| `GET /v1/address/{address}/history` | transactions touching the address, newest first, with `kind` and signed `amount` |
+| `GET /v1/mining/template?address=` | a block ready to mine (nonce 0), its target and Argon2id settings |
+| `POST /v1/mining/submit` | `{"hex": ...}` a mined block |
+| `WS /v1/ws` | live events |
+
+WebSocket: send `{"subscribe": ["blocks", "mempool", "address:<address>"]}` (any number of times).
+The node answers `{"event": "subscribed", ...}` and then pushes `block`, `reorg`, `tx` and `address`
+events (`address` events say `pending` or `confirmed`). A client that falls more than 1,000 events
+behind is disconnected.
+
+## 16. Peer-to-peer (planned)
+
+- Nodes talk to each other over WebSocket on the same port.
+- Handshake exchanges network id, genesis id, height and total work. Every message has a request id,
+  a size limit and a checked schema; misbehaving peers are disconnected.
+- New blocks and transfers are announced by id; peers fetch only what they don't have.
+- Sync: headers first, then chunks (section 12).

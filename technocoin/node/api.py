@@ -1,0 +1,291 @@
+"""The node's HTTP and WebSocket API, version 1. Interactive documentation at /docs.
+
+    GET  /v1/status                      network, height, difficulty, fees
+    GET  /v1/blocks/{height or id}       a block (?format=hex for raw bytes)
+    GET  /v1/tx/{txid}                   a transaction: confirmed or waiting
+    POST /v1/tx                          {"hex": ...} submit a signed transfer
+    GET  /v1/mempool                     waiting transfers
+    GET  /v1/address/{address}           balance, nonce, waiting and unlocking amounts
+    GET  /v1/address/{address}/history   transactions, newest first
+    GET  /v1/mining/template?address=    a block to mine
+    POST /v1/mining/submit               {"hex": ...} a mined block
+    WS   /v1/ws                          send {"subscribe": ["blocks", "mempool", "address:<addr>"]}
+
+Errors are {"error": code, "detail": text} with a 4xx status.
+"""
+
+import asyncio
+import contextlib
+import json
+import traceback
+from collections.abc import Awaitable, Callable
+from typing import Annotated
+
+from fastapi import FastAPI, Query, Request, WebSocket
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from .. import __version__
+from ..core.block import BlockHeader, block_from_bytes
+from ..core.difficulty import difficulty
+from ..core.errors import DecodeError, ValidationError
+from ..core.tx import Coinbase, transaction_from_bytes
+from ..crypto.address import decode_address, is_valid_address
+from .service import HistoryItem, NodeService
+from .views import amount, block_view, tx_view
+
+MAX_BODY_BYTES = 2_000_000
+MAX_TOPICS = 1000
+
+BackgroundTask = Callable[[NodeService], Awaitable[None]]
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, code: str, detail: str = "") -> None:
+        self.status = status
+        self.code = code
+        self.detail = detail
+
+
+class HexBody(BaseModel):
+    hex: str
+
+
+def create_app(open_service: Callable[[], NodeService], background: list[BackgroundTask] | None = None) -> FastAPI:
+    """`open_service` runs inside the server's event loop (SQLite connections belong to one thread)."""
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI):
+        service = open_service()
+        app.state.service = service
+        tasks = [asyncio.create_task(task(service)) for task in background or []]
+        for task in tasks:
+            task.add_done_callback(lambda t: _report_failure(t, service))
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(BaseException):
+                    await task
+            service.close()
+
+    app = FastAPI(title="TechnoCoin node", version=__version__, lifespan=lifespan,
+                  description="Amounts are strings in TC with 6 decimals. Ids are hex.")
+
+    @app.exception_handler(ApiError)
+    async def api_error(request: Request, error: ApiError) -> JSONResponse:
+        return JSONResponse({"error": error.code, "detail": error.detail}, status_code=error.status)
+
+    @app.middleware("http")
+    async def limit_body(request: Request, call_next):
+        length = request.headers.get("content-length")
+        if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
+            return JSONResponse({"error": "too-large", "detail": f"at most {MAX_BODY_BYTES} bytes"}, status_code=413)
+        return await call_next(request)
+
+    def service_of(request: Request) -> NodeService:
+        return request.app.state.service
+
+    def parse_address(service: NodeService, text: str) -> bytes:
+        try:
+            return decode_address(text, service.params.address_prefix)
+        except ValueError as error:
+            raise ApiError(400, "bad-address", str(error)) from None
+
+    def parse_hex(text: str) -> bytes:
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            raise ApiError(400, "bad-hex", "not a hex string") from None
+
+    def item_view(service: NodeService, item: HistoryItem) -> dict:
+        view = tx_view(item.tx, service.params)
+        if item.location is None:
+            return {**view, "status": "pending"}
+        return {**view, "status": "confirmed", "height": item.location.height,
+                "block": item.location.block_id.hex(), "time": item.time,
+                "confirmations": service.confirmations(item.location.height)}
+
+    @app.get("/v1/status")
+    async def status(request: Request) -> dict:
+        service = service_of(request)
+        params, tip = service.params, service.chain.tip.header
+        return {
+            "network": params.name,
+            "version": __version__,
+            "genesis": service.chain.genesis.block_id.hex(),
+            "height": tip.height,
+            "tip": block_summary(service, tip),
+            "finalized_height": service.chain.finalized_height(),
+            "target_spacing": params.target_spacing,
+            "block_reward": amount(params.block_reward),
+            "coinbase_maturity": params.coinbase_maturity,
+            "address_prefix": params.address_prefix,
+            "min_fee_per_byte": amount(service.mempool.min_fee_per_byte),
+            "mempool": {"count": len(service.mempool), "bytes": service.mempool.size_bytes},
+        }
+
+    @app.get("/v1/blocks/{ref}")
+    async def get_block(ref: str, request: Request, format: str = "json") -> dict:
+        service = service_of(request)
+        if ref.isdigit():
+            block = service.chain.main_block(int(ref))
+        else:
+            block_id = parse_hex(ref)
+            block = service.store.block(block_id) if len(block_id) == 32 else None
+        if block is None:
+            raise ApiError(404, "unknown-block")
+        if format == "hex":
+            return {"hex": block.serialize().hex()}
+        on_main = service.chain.is_on_main_chain(block.block_id)
+        return block_view(block, service.params, on_main_chain=on_main,
+                          confirmations=service.confirmations(block.height) if on_main else 0)
+
+    @app.get("/v1/tx/{txid}")
+    async def get_tx(txid: str, request: Request) -> dict:
+        service = service_of(request)
+        item = service.find_transaction(parse_hex(txid))
+        if item is None:
+            raise ApiError(404, "unknown-transaction")
+        return item_view(service, item)
+
+    @app.post("/v1/tx")
+    async def post_tx(body: HexBody, request: Request) -> dict:
+        service = service_of(request)
+        try:
+            tx = transaction_from_bytes(parse_hex(body.hex))
+        except DecodeError as error:
+            raise ApiError(400, "bad-encoding", str(error)) from None
+        try:
+            service.submit_transaction(tx)
+        except ValidationError as error:
+            raise ApiError(400, error.code, error.detail) from None
+        return {"txid": tx.txid.hex(), "status": "pending"}
+
+    @app.get("/v1/mempool")
+    async def mempool(request: Request, limit: Annotated[int, Query(ge=1, le=10_000)] = 1000) -> dict:
+        service = service_of(request)
+        entries = service.mempool.entries()
+        return {"count": len(entries), "bytes": service.mempool.size_bytes,
+                "txids": [e.tx.txid.hex() for e in entries[:limit]]}
+
+    @app.get("/v1/address/{address}")
+    async def get_address(address: str, request: Request) -> dict:
+        service = service_of(request)
+        info = service.account(parse_address(service, address))
+        return {
+            "address": address,
+            "balance": amount(info.balance),
+            "available": amount(info.available),
+            "pending_out": amount(info.pending_out),
+            "pending_in": amount(info.pending_in),
+            "immature": amount(info.immature),
+            "nonce": info.nonce,
+            "next_nonce": info.next_nonce,
+        }
+
+    @app.get("/v1/address/{address}/history")
+    async def get_history(address: str, request: Request,
+                          limit: Annotated[int, Query(ge=1, le=500)] = 50) -> list[dict]:
+        service = service_of(request)
+        payload = parse_address(service, address)
+        result = []
+        for item in service.history(payload, limit):
+            tx = item.tx
+            if isinstance(tx, Coinbase):
+                kind, delta = "mined", tx.amount
+            else:
+                received = sum(o.amount for o in tx.outputs if o.address == payload)
+                spent = tx.total_spent if tx.sender == payload else 0
+                kind = "received" if not spent else ("self" if received else "sent")
+                delta = received - spent
+            result.append({"kind": kind, "amount": amount(delta), **item_view(service, item)})
+        return result
+
+    @app.get("/v1/mining/template")
+    async def mining_template(address: str, request: Request) -> dict:
+        service = service_of(request)
+        block = service.template(parse_address(service, address))
+        pow_params = service.params.pow
+        return {
+            "height": block.height,
+            "hex": block.serialize().hex(),
+            "target": f"{block.header.target:064x}",
+            "pow": {"algorithm": "argon2id", "memory_kib": pow_params.memory_kib,
+                    "iterations": pow_params.iterations, "salt": pow_params.salt.hex()},
+        }
+
+    @app.post("/v1/mining/submit")
+    async def mining_submit(body: HexBody, request: Request) -> dict:
+        service = service_of(request)
+        data = parse_hex(body.hex)
+        if len(data) > service.params.max_block_size:
+            raise ApiError(400, "block-too-large")
+        try:
+            block = block_from_bytes(data)
+        except DecodeError as error:
+            raise ApiError(400, "bad-encoding", str(error)) from None
+        result = service.submit_block(block, source="api")
+        return {"id": block.block_id.hex(), "result": result.outcome.value,
+                "error": result.error.code if result.error else None}
+
+    @app.websocket("/v1/ws")
+    async def websocket(socket: WebSocket) -> None:
+        service: NodeService = socket.app.state.service
+        await socket.accept()
+        subscription = service.events.subscribe()
+
+        async def read() -> None:
+            while True:
+                try:
+                    message = await socket.receive_json()
+                except json.JSONDecodeError:
+                    subscription.deliver({"event": "error", "data": {"error": "bad-json"}})
+                    continue
+                topics = message.get("subscribe") if isinstance(message, dict) else None
+                if not isinstance(topics, list):
+                    subscription.deliver({"event": "error", "data": {"error": "expected {\"subscribe\": [...]}"}})
+                    continue
+                accepted = [t for t in topics if _valid_topic(t, service)]
+                room = MAX_TOPICS - len(subscription.topics)
+                subscription.topics.update(accepted[:room])
+                subscription.deliver({"event": "subscribed", "data": {
+                    "topics": sorted(subscription.topics),
+                    "rejected": [t for t in topics if t not in subscription.topics]}})
+
+        async def write() -> None:
+            while not subscription.overflowed:
+                await socket.send_json(await subscription.queue.get())
+
+        tasks = {asyncio.create_task(read()), asyncio.create_task(write())}
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            service.events.unsubscribe(subscription)
+            with contextlib.suppress(Exception):
+                await socket.close()
+
+    return app
+
+
+def block_summary(service: NodeService, header: BlockHeader) -> dict:
+    return {"id": header.block_id.hex(), "height": header.height, "time": header.timestamp,
+            "difficulty": difficulty(header.target, service.params)}
+
+
+def _valid_topic(topic: object, service: NodeService) -> bool:
+    if topic in ("blocks", "mempool"):
+        return True
+    return (isinstance(topic, str) and topic.startswith("address:")
+            and is_valid_address(topic[len("address:"):], service.params.address_prefix))
+
+
+def _report_failure(task: asyncio.Task, service: NodeService) -> None:
+    if task.cancelled() or task.exception() is None:
+        return
+    error = task.exception()
+    service.log("background task failed:\n" + "".join(traceback.format_exception(error)))

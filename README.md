@@ -18,15 +18,15 @@ The full rules are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 ```
 technocoin/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
 technocoin/crypto/   keys, passphrases, addresses
-technocoin/wallet/   encrypted wallet file
-technocoin/node/     SQLite storage and chain manager (branches, reorganisation, finality)
+technocoin/wallet/   encrypted wallet file, node client
+technocoin/node/     chain (SQLite, branches, finality), mempool, API server, built-in miner
+technocoin/miner/    multi-core Argon2id miner
 technocoin/cli.py    the `tc` command
 tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
 
-Coming next: mempool and miner, then the node's HTTP/WebSocket API, peer-to-peer
-sync with chunks, and launch.
+Coming next: peer-to-peer sync with chunks (several nodes), then launch.
 
 ## Try it: a local devnet
 
@@ -47,19 +47,37 @@ the devnet away and start a fresh one.
 rarely helps: every hash needs 4 MiB of memory, so extra workers just compete for memory
 bandwidth (that's what keeps big machines from dominating).
 
+While the node runs, in a second terminal:
+
+```
+python -m technocoin --network devnet wallet balance
+python -m technocoin --network devnet wallet send td1... 12.5 --memo "thanks" --wait
+python -m technocoin --network devnet wallet history
+```
+
 ## Wallet
 
 ```
-python -m technocoin wallet create          # new wallet; shows your 24 words once
-python -m technocoin wallet restore         # from your 24 words
-python -m technocoin wallet addresses
-python -m technocoin wallet new-address
-python -m technocoin wallet show-passphrase
+tc wallet create             new wallet; shows your 24 words once
+tc wallet restore            from your 24 words
+tc wallet addresses          your addresses
+tc wallet new-address        add another address
+tc wallet show-passphrase    your 24 words again
+tc wallet balance            available, incoming, outgoing, unlocking
+tc wallet send ADDRESS AMOUNT [--fee X] [--from N] [--memo TEXT] [--wait] [--yes]
+tc wallet history
 ```
 
-Add `--network testnet` or `--network regtest` before `wallet` for other networks.
-Wallets live in `~/.technocoin/<network>/wallet.json` (change with `--datadir` or
-`TECHNOCOIN_HOME`). After `pip install -e .` the command is simply `tc`.
+`tc` is `python -m technocoin` until you `pip install -e .`. Put `--network testnet|devnet`
+before `wallet` for other networks. Wallets live in `~/.technocoin/<network>/wallet.json` (change
+with `--datadir` or `TECHNOCOIN_HOME`). Commands that need a node talk to the one on this computer;
+use `wallet --node http://host:port ...` for another.
+
+## Node API
+
+`tc node` serves an HTTP + WebSocket API on the network's port (64187 on devnet), on this computer
+only unless you pass `--host`. Interactive documentation: http://127.0.0.1:64187/docs. The endpoints
+are listed in [docs/PROTOCOL.md](docs/PROTOCOL.md), section 15.
 
 ## Development
 
