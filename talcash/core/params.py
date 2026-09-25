@@ -7,7 +7,8 @@
            genesis block when it is created (see node/network.py).
   regtest  for automated tests only: instant blocks, difficulty never changes
 
-Mainnet and testnet genesis fields stay empty until those networks are launched.
+The testnet was launched on 25 September 2026. Mainnet's genesis fields stay empty until
+mainnet is launched.
 """
 
 from dataclasses import dataclass
@@ -85,6 +86,10 @@ TESTNET = NetworkParams(
     pow=_ARGON2_MAINNET,
     pow_limit=target_for(600),
     genesis_target=target_for(18_000),
+    genesis_timestamp=1_790_314_770,  # 2026-09-25 05:39:30 UTC
+    genesis_message=b"TalCash testnet, 25 Sep 2026",
+    genesis_nonce=18117,
+    genesis_id=bytes.fromhex("6a6cf3fa017cc101dc8bec6dec72a5802b37a6637ae847b4e8f4266739b6beef"),
 )
 
 # Mainnet's behaviour at 60x speed: one block per second, a one-minute ASERT half-life

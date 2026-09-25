@@ -62,6 +62,21 @@ python -m talcash --network devnet wallet send td1... 3 td1... 1.25    # several
 python -m talcash --network devnet wallet history
 ```
 
+## Join the public testnet
+
+The testnet runs the same rules as mainnet (1-minute blocks); its coins are worthless test coins
+with `tt1…` addresses. A new node needs one address to find the network, after that it
+remembers its peers:
+
+```
+python -m talcash --network testnet node --peer ws://node.talcash.com:64185/v1/p2p
+python -m talcash --network testnet wallet create
+python -m talcash --network testnet wallet balance
+```
+
+To let other nodes connect to yours, open port 64185 and start the node with
+`--host 0.0.0.0 --public-url ws://YOUR-ADDRESS:64185/v1/p2p`.
+
 ## Several nodes on one computer
 
 ```

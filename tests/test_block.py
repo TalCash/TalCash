@@ -45,20 +45,21 @@ def test_merkle_has_no_duplicate_last_leaf_ambiguity():
     assert merkle_root([A, B]) != merkle_root([node(leaf(A), leaf(B))])
 
 
-def test_regtest_genesis():
-    genesis = genesis_block(REGTEST)
+@pytest.mark.parametrize("params", [REGTEST, TESTNET], ids=["regtest", "testnet"])
+def test_launched_networks_have_a_valid_genesis(params):
+    genesis = genesis_block(params)
+    assert genesis.block_id == params.genesis_id
     assert genesis.height == 0
     assert genesis.header.prev_id == bytes(32)
-    assert genesis.coinbase.address == BURN_PAYLOAD
-    assert genesis.coinbase.memo == REGTEST.genesis_message
-    assert meets_target(genesis.header, REGTEST.pow)
-    check_block(genesis, REGTEST)
+    assert genesis.coinbase.address == BURN_PAYLOAD  # nobody can spend the first reward
+    assert genesis.coinbase.memo == params.genesis_message
+    assert meets_target(genesis.header, params.pow)
+    check_block(genesis, params)
 
 
-@pytest.mark.parametrize("params", [MAINNET, TESTNET])
-def test_unlaunched_networks_have_no_genesis(params):
+def test_mainnet_has_no_genesis_until_launch():
     with pytest.raises(RuntimeError, match="not been launched"):
-        genesis_block(params)
+        genesis_block(MAINNET)
 
 
 def test_header_and_block_round_trip():

@@ -10,7 +10,7 @@ Status of each part:
 | Part | Status |
 |---|---|
 | Amounts, encoding, hashing, addresses, transactions, blocks, PoW, difficulty, state, balance snapshots | Implemented and tested |
-| Genesis | Implemented; mainnet/testnet genesis gets mined at launch |
+| Genesis | Implemented; testnet launched 2026-09-25, mainnet genesis gets mined at launch |
 | Chain selection, reorganisation, finality | Implemented in `talcash/node/chain.py` and tested |
 | Mempool policy, block templates, miner | Implemented and tested |
 | Node API (HTTP + WebSocket) | Implemented and tested |
@@ -242,6 +242,10 @@ coinbase with height 0 paying `block_reward` to the **burn address**, memo = the
 Nodes hard-code its timestamp, message, nonce and id. The mainnet message and timestamp are
 chosen at launch.
 
+Testnet genesis (launched 2026-09-25): timestamp `1790314770` (05:39:30 UTC), message
+`TalCash testnet, 25 Sep 2026`, nonce `18117`, id
+`6a6cf3fa017cc101dc8bec6dec72a5802b37a6637ae847b4e8f4266739b6beef`.
+
 ## 11. Chain selection and finality (node rules)
 
 - The best chain is the valid chain with the most total `block_work`; ties go to the one seen first.
@@ -317,7 +321,7 @@ and snapshots. Archive nodes keep everything.
 | proof of work | Argon2id 4 MiB | same | same | Argon2id 8 KiB |
 | genesis target | ~18,000 hashes | same | ~300 hashes | ~2 hashes |
 | pow_limit (easiest) | ~600 hashes | same | ~10 hashes | ~2 hashes |
-| genesis | mined at launch | mined at launch | mined when a devnet is created | fixed |
+| genesis | mined at launch | 2026-09-25 (`6a6cf3fa…`) | mined when a devnet is created | fixed |
 
 Every network pays 10 TC per block, matures rewards after 100 blocks and finalizes 100 blocks deep.
 Devnet is mainnet at 60x speed: the same rules and mining work, and the same behaviour counted in
