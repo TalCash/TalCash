@@ -1,7 +1,11 @@
 # TalCash
 
 A small proof-of-work cryptocurrency written in Python: node, miner and wallet in one project,
-all sharing a single implementation of the rules.
+all sharing a single implementation of the rules. Website: [talcash.com](https://talcash.com)
+
+> **Status: in development.** No mainnet has launched and no TalCash coin or token is for sale
+> anywhere; anything claiming otherwise is not this project. Found a security problem? See
+> [SECURITY.md](SECURITY.md).
 
 - 1 block per minute, 10 TC per block forever (14,400 TC a day)
 - 6 decimals, integer amounts only
@@ -16,15 +20,15 @@ The full rules are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 ## Layout
 
 ```
-talcash/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
-talcash/crypto/   keys, passphrases, addresses
-talcash/wallet/   encrypted wallet file, node client
-talcash/node/     block files, chain (SQLite index, branches, finality), mempool, API, peer-to-peer, miner
-talcash/miner/    multi-core Argon2id miner
-talcash/devnet.py `tc devnet`: several local nodes at once
-talcash/cli.py    the `tc` command
-tests/               test suite
-docs/PROTOCOL.md     protocol specification
+talcash/core/      consensus rules: encoding, transactions, blocks, PoW, difficulty, state
+talcash/crypto/    keys, passphrases, addresses
+talcash/wallet/    encrypted wallet file, node client
+talcash/node/      block files, chain (SQLite index, branches, finality), mempool, API, peer-to-peer
+talcash/miner/     multi-core Argon2id miner
+talcash/devnet.py  `tc devnet`: several local nodes at once
+talcash/cli.py     the `tc` command
+tests/             test suite
+docs/PROTOCOL.md   protocol specification
 ```
 
 Coming next: a public testnet, a block explorer, then launch.
@@ -134,3 +138,7 @@ Requires Python 3.11+.
 pip install -e ".[dev]"
 python -m pytest
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
