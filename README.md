@@ -69,7 +69,7 @@ with `tt1…` addresses. A new node needs one address to find the network, after
 remembers its peers:
 
 ```
-python -m talcash --network testnet node --peer ws://node.talcash.com:64185/v1/p2p
+python -m talcash --network testnet node --peer ws://testnet.talcash.com:64185/v1/p2p
 python -m talcash --network testnet wallet create
 python -m talcash --network testnet wallet balance
 ```

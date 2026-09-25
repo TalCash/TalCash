@@ -82,7 +82,7 @@ def is_local(host: str | None) -> bool:
     try:
         address = ipaddress.ip_address(host or "")
     except ValueError:
-        return False  # a name like node.talcash.com
+        return False  # a name like testnet.talcash.com
     mapped = getattr(address, "ipv4_mapped", None)
     address = mapped or address
     return address.is_private or address.is_link_local
