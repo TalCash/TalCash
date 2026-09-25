@@ -235,3 +235,21 @@ def test_addresses_on_this_computer_are_only_passed_on_to_local_peers():
     peers._on_get_peers(neighbour, {"type": "get_peers"})
     assert json.loads(stranger.queue.get_nowait())["urls"] == ["ws://85.10.20.30:64185/v1/p2p"]
     assert len(json.loads(neighbour.queue.get_nowait())["urls"]) == 3
+
+
+def test_local_addresses_from_peers_elsewhere_are_ignored():
+    """Otherwise a stranger could make the node connect to services on its own machine or network."""
+    peers = manager()
+    stranger = fake_peer("85.10.20.30")
+    peers._on_peers(stranger, {"type": "peers", "urls": [
+        "ws://127.0.0.1:64185/v1/p2p", "ws://10.0.0.5:8080/v1/p2p", "ws://85.10.20.31:64185/v1/p2p"]})
+    assert list(peers.addresses) == ["ws://85.10.20.31:64185/v1/p2p"]
+
+    claims_local = fake_peer("85.10.20.32")  # says "reach me at 127.0.0.1": that would be ourselves
+    peers._handle_hello(claims_local, {**peers._hello(), "node_id": "cc" * 16, "listen": "ws://127.0.0.1:9/v1/p2p"})
+    assert claims_local.http_url is None  # no chunk downloads from our own machine either
+    assert "ws://127.0.0.1:9/v1/p2p" not in peers.addresses
+
+    neighbour = fake_peer("127.0.0.1")  # a node on this very computer may tell us about local ones
+    peers._on_peers(neighbour, {"type": "peers", "urls": ["ws://127.0.0.1:64195/v1/p2p"]})
+    assert "ws://127.0.0.1:64195/v1/p2p" in peers.addresses

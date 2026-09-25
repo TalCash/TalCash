@@ -276,6 +276,14 @@ def _valid_url(url: object) -> bool:
     return isinstance(url, str) and url.startswith(("ws://", "wss://")) and len(url) <= 200
 
 
+def _meaningful_between(peer_host: str | None, url: str) -> bool:
+    """Addresses on one computer or private network (127.0.0.1, 192.168.x.x, 10.x.x.x...) only mean
+    something to peers on that same computer or network. We neither pass them to peers elsewhere
+    (they'd dial their own machine) nor take them from peers elsewhere (a stranger could make us
+    connect to services on our own machine or network)."""
+    return is_local(peer_host) or not is_local(_url_host(url))
+
+
 def _length(value: object) -> int:
     return len(value) if isinstance(value, list) else 0
 
@@ -578,7 +586,9 @@ class PeerManager:
             raise ProtocolError("bad work") from None
         if peer.url:
             self.url_node[peer.url] = node_id
-        listen = message.get("listen") if _valid_url(message.get("listen")) else None
+        listen = message.get("listen")
+        if not _valid_url(listen) or not _meaningful_between(peer.host, listen):
+            listen = None  # e.g. a stranger claiming to listen on 127.0.0.1: we won't dial ourselves
         if listen:
             self.url_node[listen] = node_id
         if any(p.node_id == node_id for p in self.ready_peers):
@@ -714,11 +724,9 @@ class PeerManager:
         peer.send({"type": "headers", "headers": [h.serialize().hex() for h in headers]})
 
     def _on_get_peers(self, peer: Peer, message: dict) -> None:
-        # Addresses on this computer or a private network mean nothing to a peer elsewhere
-        # (it would dial its own 127.0.0.1), so only local peers hear about them.
-        shareable = lambda url: is_local(peer.host) or not is_local(_url_host(url))  # noqa: E731
-        urls = [url for url in self.addresses if url not in self.self_urls and shareable(url)][:MAX_PEER_URLS - 1]
-        if self.config.listen_url and shareable(self.config.listen_url):
+        urls = [url for url in self.addresses
+                if url not in self.self_urls and _meaningful_between(peer.host, url)][:MAX_PEER_URLS - 1]
+        if self.config.listen_url and _meaningful_between(peer.host, self.config.listen_url):
             urls.append(self.config.listen_url)
         peer.send({"type": "peers", "urls": urls})
 
@@ -727,7 +735,7 @@ class PeerManager:
         if not isinstance(urls, list) or len(urls) > MAX_PEER_URLS:
             raise ProtocolError("bad peers list")
         for url in urls:
-            if _valid_url(url):
+            if _valid_url(url) and _meaningful_between(peer.host, url):
                 self._learn(url)
 
     # --- catching up ----------------------------------------------------------
