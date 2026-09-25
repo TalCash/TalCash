@@ -31,7 +31,8 @@ tests/             test suite
 docs/PROTOCOL.md   protocol specification
 ```
 
-Coming next: a public testnet, a block explorer, then launch.
+Coming next: a public testnet, a block explorer, then launch. After launch: wrapped TC on
+Ethereum, Solana and BNB Chain.
 
 ## Try it: a local devnet
 
