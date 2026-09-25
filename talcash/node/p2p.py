@@ -77,7 +77,7 @@ from ..core.errors import DecodeError, ValidationError
 from ..core.tx import Transfer, transaction_from_bytes
 from .blockfiles import ChunkError
 from .chain import HeaderTip, Outcome, all_meet_target, check_chunk_file
-from .limits import TokenBucket, is_loopback
+from .limits import TokenBucket, is_local, is_loopback
 from .service import NodeService
 from .store import STATUS_INVALID, STATUS_VALID
 
@@ -714,8 +714,11 @@ class PeerManager:
         peer.send({"type": "headers", "headers": [h.serialize().hex() for h in headers]})
 
     def _on_get_peers(self, peer: Peer, message: dict) -> None:
-        urls = [url for url in self.addresses if url not in self.self_urls][:MAX_PEER_URLS - 1]
-        if self.config.listen_url:
+        # Addresses on this computer or a private network mean nothing to a peer elsewhere
+        # (it would dial its own 127.0.0.1), so only local peers hear about them.
+        shareable = lambda url: is_local(peer.host) or not is_local(_url_host(url))  # noqa: E731
+        urls = [url for url in self.addresses if url not in self.self_urls and shareable(url)][:MAX_PEER_URLS - 1]
+        if self.config.listen_url and shareable(self.config.listen_url):
             urls.append(self.config.listen_url)
         peer.send({"type": "peers", "urls": urls})
 

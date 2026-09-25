@@ -224,3 +224,14 @@ def test_only_fully_checked_blocks_are_passed_on_and_they_are_read_when_sent():
     assert callable(lazy)  # nothing read from disk yet
     assert json.loads(lazy())["hex"] == main.blocks[2].serialize().hex()
     assert not_found == {"type": "not_found", "blocks": [b.hex() for b in wanted[1:]], "txs": []}
+
+
+def test_addresses_on_this_computer_are_only_passed_on_to_local_peers():
+    peers = manager()
+    for url in ("ws://127.0.0.1:64195/v1/p2p", "ws://192.168.1.20:64185/v1/p2p", "ws://85.10.20.30:64185/v1/p2p"):
+        peers.addresses[url] = None
+    stranger, neighbour = fake_peer("207.180.243.13"), fake_peer("127.0.0.1")
+    peers._on_get_peers(stranger, {"type": "get_peers"})
+    peers._on_get_peers(neighbour, {"type": "get_peers"})
+    assert json.loads(stranger.queue.get_nowait())["urls"] == ["ws://85.10.20.30:64185/v1/p2p"]
+    assert len(json.loads(neighbour.queue.get_nowait())["urls"]) == 3

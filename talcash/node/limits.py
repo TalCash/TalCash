@@ -72,3 +72,17 @@ def is_loopback(host: str | None) -> bool:
         return False
     mapped = getattr(address, "ipv4_mapped", None)  # ::ffff:127.0.0.1 on dual-stack sockets
     return address.is_loopback or (mapped is not None and mapped.is_loopback)
+
+
+def is_local(host: str | None) -> bool:
+    """Is this address only reachable from this computer or a private network (192.168.x.x,
+    10.x.x.x, ...)? Such addresses mean nothing to someone elsewhere on the internet."""
+    if is_loopback(host):
+        return True
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False  # a name like node.talcash.com
+    mapped = getattr(address, "ipv4_mapped", None)
+    address = mapped or address
+    return address.is_private or address.is_link_local
