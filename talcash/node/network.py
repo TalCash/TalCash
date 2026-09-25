@@ -45,7 +45,7 @@ def load_params(name: str, base: Path | None = None, *, create: bool = True) -> 
 def _create_devnet_genesis(path: Path) -> None:
     timestamp = int(time.time())
     stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(timestamp))
-    block = mine_genesis(DEVNET, timestamp=timestamp, message=f"TechnoCoin devnet {stamp} UTC".encode())
+    block = mine_genesis(DEVNET, timestamp=timestamp, message=f"TalCash devnet {stamp} UTC".encode())
     _write_genesis(path, {
         "timestamp": timestamp,
         "message": block.coinbase.memo.hex(),

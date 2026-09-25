@@ -345,9 +345,9 @@ def cmd_devnet(args: argparse.Namespace, params: NetworkParams) -> int:
 # --- wiring ------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tc", description="TechnoCoin command line")
+    parser = argparse.ArgumentParser(prog="tc", description="TalCash command line")
     parser.add_argument("--network", choices=sorted(NETWORKS), default="mainnet")
-    parser.add_argument("--datadir", help="base folder (default: $TECHNOCOIN_HOME or ~/.technocoin)")
+    parser.add_argument("--datadir", help="base folder (default: $TALCASH_HOME or ~/.talcash)")
     commands = parser.add_subparsers(dest="command", required=True)
 
     wallet = commands.add_parser("wallet", help="manage your wallet")

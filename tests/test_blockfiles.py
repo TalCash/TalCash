@@ -9,18 +9,18 @@ from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
 
-from technocoin.cli import main
-from technocoin.core.block import Block, block_from_bytes
-from technocoin.core.params import REGTEST
-from technocoin.core.errors import ValidationError
-from technocoin.core.pow import meets_target, mine
-from technocoin.crypto.address import encode_address
-from technocoin.node.api import create_app
-from technocoin.node.blockfiles import ChunkError, decode_chunk, encode_chunk
-from technocoin.node.chain import ChainManager, Outcome
-from technocoin.node.reindex import reindex
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
+from talcash.cli import main
+from talcash.core.block import Block, block_from_bytes
+from talcash.core.params import REGTEST
+from talcash.core.errors import ValidationError
+from talcash.core.pow import meets_target, mine
+from talcash.crypto.address import encode_address
+from talcash.node.api import create_app
+from talcash.node.blockfiles import ChunkError, decode_chunk, encode_chunk
+from talcash.node.chain import ChainManager, Outcome
+from talcash.node.reindex import reindex
+from talcash.node.service import NodeService
+from talcash.node.store import Store
 
 from chainutil import TestChain, make_transfer, named_key
 
@@ -83,7 +83,7 @@ def test_chunk_file_round_trip_and_every_damaged_byte_is_caught(history):
             decode_chunk(bytes(damaged))
     with pytest.raises(ChunkError):
         decode_chunk(data[:-1])
-    with pytest.raises(ChunkError, match="not a TechnoCoin chunk"):
+    with pytest.raises(ChunkError, match="not a TalCash chunk"):
         decode_chunk(b"hello")
     reordered, _ = encode_chunk(PARAMS.network_id, 0, 0, [raw[0], raw[2], raw[1], raw[3], raw[4]])
     with pytest.raises(ChunkError, match="chain"):

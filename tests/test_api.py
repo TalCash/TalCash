@@ -4,13 +4,13 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from technocoin.core.block import Block, block_from_bytes
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import meets_target, mine
-from technocoin.crypto.address import encode_address
-from technocoin.node.api import ApiPolicy, create_app
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
+from talcash.core.block import Block, block_from_bytes
+from talcash.core.params import REGTEST
+from talcash.core.pow import meets_target, mine
+from talcash.crypto.address import encode_address
+from talcash.node.api import ApiPolicy, create_app
+from talcash.node.service import NodeService
+from talcash.node.store import Store
 
 from chainutil import make_transfer, named_key
 

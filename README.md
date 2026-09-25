@@ -1,4 +1,4 @@
-# TechnoCoin
+# TalCash
 
 A small proof-of-work cryptocurrency written in Python: node, miner and wallet in one project,
 all sharing a single implementation of the rules.
@@ -16,13 +16,13 @@ The full rules are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 ## Layout
 
 ```
-technocoin/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
-technocoin/crypto/   keys, passphrases, addresses
-technocoin/wallet/   encrypted wallet file, node client
-technocoin/node/     block files, chain (SQLite index, branches, finality), mempool, API, peer-to-peer, miner
-technocoin/miner/    multi-core Argon2id miner
-technocoin/devnet.py `tc devnet`: several local nodes at once
-technocoin/cli.py    the `tc` command
+talcash/core/     consensus rules: encoding, transactions, blocks, PoW, difficulty, state
+talcash/crypto/   keys, passphrases, addresses
+talcash/wallet/   encrypted wallet file, node client
+talcash/node/     block files, chain (SQLite index, branches, finality), mempool, API, peer-to-peer, miner
+talcash/miner/    multi-core Argon2id miner
+talcash/devnet.py `tc devnet`: several local nodes at once
+talcash/cli.py    the `tc` command
 tests/               test suite
 docs/PROTOCOL.md     protocol specification
 ```
@@ -31,12 +31,12 @@ Coming next: a public testnet, a block explorer, then launch.
 
 ## Try it: a local devnet
 
-Devnet is TechnoCoin on your own computer at 60x speed: one block per second, same rules and
+Devnet is TalCash on your own computer at 60x speed: one block per second, same rules and
 mining as mainnet.
 
 ```
-python -m technocoin --network devnet wallet create
-python -m technocoin --network devnet node --mine
+python -m talcash --network devnet wallet create
+python -m talcash --network devnet node --mine
 ```
 
 The node mines to your wallet's first address and prints every block: difficulty climbing as it
@@ -51,16 +51,16 @@ bandwidth (that's what keeps big machines from dominating).
 While the node runs, in a second terminal:
 
 ```
-python -m technocoin --network devnet wallet balance
-python -m technocoin --network devnet wallet send td1... 12.5 --memo "thanks" --wait
-python -m technocoin --network devnet wallet send td1... 3 td1... 1.25    # several receivers, one payment
-python -m technocoin --network devnet wallet history
+python -m talcash --network devnet wallet balance
+python -m talcash --network devnet wallet send td1... 12.5 --memo "thanks" --wait
+python -m talcash --network devnet wallet send td1... 3 td1... 1.25    # several receivers, one payment
+python -m talcash --network devnet wallet history
 ```
 
 ## Several nodes on one computer
 
 ```
-python -m technocoin devnet --nodes 3 --miners 2
+python -m talcash devnet --nodes 3 --miners 2
 ```
 
 Starts three devnet nodes as separate processes (ports 64187, 64188, 64189), all connected, two of
@@ -73,13 +73,13 @@ started with `--peer` joins that devnet instead of creating its own.
 
 ## Block files
 
-Every node keeps the chain as files: `~/.technocoin/<network>/blocks/chunks/*.chunk` (one file per
+Every node keeps the chain as files: `~/.talcash/<network>/blocks/chunks/*.chunk` (one file per
 sealed day, compressed) and `blocks/recent/*.block` (newer blocks, one file each). The database next
 to them is only an index plus balances and can always be rebuilt:
 
 ```
-python -m technocoin --network devnet node --reindex      # rebuild the database from the files
-python -m technocoin read <file>.chunk [--blocks]         # check a file and show it as JSON
+python -m talcash --network devnet node --reindex      # rebuild the database from the files
+python -m talcash read <file>.chunk [--blocks]         # check a file and show it as JSON
 ```
 
 Copy the `blocks` folder to another machine and `--reindex` there gives it the whole chain.
@@ -101,9 +101,9 @@ tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...] [--fee X] [--from N] [--memo 
 tc wallet history
 ```
 
-`tc` is `python -m technocoin` until you `pip install -e .`. Put `--network testnet|devnet`
-before `wallet` for other networks. Wallets live in `~/.technocoin/<network>/wallet.json` (change
-with `--datadir` or `TECHNOCOIN_HOME`). Commands that need a node talk to the one on this computer;
+`tc` is `python -m talcash` until you `pip install -e .`. Put `--network testnet|devnet`
+before `wallet` for other networks. Wallets live in `~/.talcash/<network>/wallet.json` (change
+with `--datadir` or `TALCASH_HOME`). Commands that need a node talk to the one on this computer;
 use `wallet --node http://host:port ...` for another.
 
 ## Node API

@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "technocoin"
+name = "talcash"
 version = "0.1.0.dev0"
-description = "TechnoCoin: a small proof-of-work cryptocurrency (node, miner, wallet)"
+description = "TalCash: a small proof-of-work cryptocurrency (node, miner, wallet)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,16 +17,16 @@ dependencies = [
 ]
 
 [project.scripts]
-tc = "technocoin.cli:main"
+tc = "talcash.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
-include = ["technocoin*"]
+include = ["talcash*"]
 
 [tool.setuptools.package-data]
-"technocoin.crypto" = ["english.txt"]
+"talcash.crypto" = ["english.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

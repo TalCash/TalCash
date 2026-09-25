@@ -1,4 +1,4 @@
-"""`tc devnet`: a whole local TechnoCoin network on this computer.
+"""`tc devnet`: a whole local TalCash network on this computer.
 
 Starts N devnet nodes as separate processes, each with its own data folder and
 port (64187, 64188, ...), every node connected to every other, and the first M
@@ -77,7 +77,7 @@ def run_devnet(
     processes: list[subprocess.Popen] = []
     try:
         for i, (node_dir, port) in enumerate(zip(node_dirs, ports)):
-            command = [sys.executable, "-u", "-m", "technocoin", "--network", "devnet", "--datadir", str(node_dir),
+            command = [sys.executable, "-u", "-m", "talcash", "--network", "devnet", "--datadir", str(node_dir),
                        "node", "--port", str(port)]
             for other in ports[:i]:
                 command += ["--peer", f"ws://127.0.0.1:{other}/v1/p2p"]

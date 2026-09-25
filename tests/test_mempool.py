@@ -4,15 +4,15 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.block import Block
-from technocoin.core.errors import ValidationError
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import mine
-from technocoin.core.tx import Coinbase
-from technocoin.node.chain import ChainManager, Outcome
-from technocoin.node.mempool import Mempool
-from technocoin.node.store import Store
-from technocoin.node.template import build_template
+from talcash.core.block import Block
+from talcash.core.errors import ValidationError
+from talcash.core.params import REGTEST
+from talcash.core.pow import mine
+from talcash.core.tx import Coinbase
+from talcash.node.chain import ChainManager, Outcome
+from talcash.node.mempool import Mempool
+from talcash.node.store import Store
+from talcash.node.template import build_template
 
 from chainutil import TestChain, make_transfer, named_key
 

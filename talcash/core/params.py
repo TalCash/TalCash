@@ -21,7 +21,7 @@ class PowParams:
 
     memory_kib: int
     iterations: int
-    salt: bytes = b"TechnoCoin/PoW/1"  # Argon2 via libsodium needs exactly 16 bytes
+    salt: bytes = b"TalCash/Argon2/1"  # Argon2 via libsodium needs exactly 16 bytes
 
 
 def target_for(expected_hashes: int) -> int:
@@ -115,9 +115,9 @@ REGTEST = NetworkParams(
     genesis_target=target_for(2),
     pow_no_retarget=True,
     genesis_timestamp=1_767_225_600,  # 2026-01-01 00:00:00 UTC
-    genesis_message=b"TechnoCoin regtest",
-    genesis_nonce=2,
-    genesis_id=bytes.fromhex("f7b448d97f6e94aaeb2181aaa1f6d39a96de10c45f7ca60dca8245b46567ec14"),
+    genesis_message=b"TalCash regtest",
+    genesis_nonce=1,
+    genesis_id=bytes.fromhex("ca4d99507e879bb59d28eb9d4a578d54b5c833c5d51f3e8e5a95d76faa63393b"),
 )
 
 NETWORKS = {params.name: params for params in (MAINNET, TESTNET, DEVNET, REGTEST)}

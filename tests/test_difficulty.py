@@ -1,9 +1,9 @@
 import pytest
 
-from technocoin.core.block import BlockHeader
-from technocoin.core.difficulty import asert_target, block_work, median_time_past, next_target
-from technocoin.core.genesis import genesis_block
-from technocoin.core.params import MAINNET, REGTEST
+from talcash.core.block import BlockHeader
+from talcash.core.difficulty import asert_target, block_work, median_time_past, next_target
+from talcash.core.genesis import genesis_block
+from talcash.core.params import MAINNET, REGTEST
 
 ANCHOR = 1 << 200
 LIMIT = 1 << 250

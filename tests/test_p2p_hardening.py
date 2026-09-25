@@ -8,15 +8,15 @@ from dataclasses import replace
 import pytest
 from websockets.exceptions import ConnectionClosed
 
-from technocoin.core.block import BlockHeader
-from technocoin.core.genesis import genesis_block
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import meets_target, mine
-from technocoin.crypto.address import encode_address
-from technocoin.node import p2p
-from technocoin.node.p2p import P2PConfig, Peer, PeerManager
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
+from talcash.core.block import BlockHeader
+from talcash.core.genesis import genesis_block
+from talcash.core.params import REGTEST
+from talcash.core.pow import meets_target, mine
+from talcash.crypto.address import encode_address
+from talcash.node import p2p
+from talcash.node.p2p import P2PConfig, Peer, PeerManager
+from talcash.node.service import NodeService
+from talcash.node.store import Store
 
 from chainutil import TestChain, make_transfer, named_key
 from netutil import (LocalNode, assert_disconnected, assert_still_connected, raw_peer, receive_until,

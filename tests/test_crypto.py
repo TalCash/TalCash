@@ -1,7 +1,7 @@
 import pytest
 
-from technocoin.crypto import hd, keys, mnemonic
-from technocoin.crypto.address import (
+from talcash.crypto import hd, keys, mnemonic
+from talcash.crypto.address import (
     BURN_PAYLOAD,
     _checksum,
     decode_address,
@@ -9,7 +9,7 @@ from technocoin.crypto.address import (
     is_valid_address,
     payload_from_public_key,
 )
-from technocoin.crypto.base58 import b58decode, b58encode
+from talcash.crypto.base58 import b58decode, b58encode
 
 
 # --- base58 ---------------------------------------------------------------

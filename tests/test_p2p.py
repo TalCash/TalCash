@@ -7,12 +7,12 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.block import Block, block_from_bytes
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import meets_target
-from technocoin.crypto.address import encode_address
-from technocoin.node import p2p
-from technocoin.node.network import join_devnet, load_params
+from talcash.core.block import Block, block_from_bytes
+from talcash.core.params import REGTEST
+from talcash.core.pow import meets_target
+from talcash.crypto.address import encode_address
+from talcash.node import p2p
+from talcash.node.network import join_devnet, load_params
 
 from chainutil import make_transfer, named_key
 from netutil import LocalNode, assert_disconnected, raw_peer, wait_until

@@ -5,19 +5,19 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.cli import main
-from technocoin.core.genesis import genesis_block
-from technocoin.core.params import DEVNET, MAINNET, REGTEST, target_for
-from technocoin.core.pow import meets_target
-from technocoin.crypto.address import encode_address
-from technocoin.miner.engine import Miner
-from technocoin.node.chain import ChainManager
-from technocoin.node.network import GENESIS_FILE, load_params, reset_devnet
-from technocoin.node.server import mining_loop
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
-from technocoin.wallet.keystore import INSECURE_FAST
-from technocoin.wallet.wallet import Wallet
+from talcash.cli import main
+from talcash.core.genesis import genesis_block
+from talcash.core.params import DEVNET, MAINNET, REGTEST, target_for
+from talcash.core.pow import meets_target
+from talcash.crypto.address import encode_address
+from talcash.miner.engine import Miner
+from talcash.node.chain import ChainManager
+from talcash.node.network import GENESIS_FILE, load_params, reset_devnet
+from talcash.node.server import mining_loop
+from talcash.node.service import NodeService
+from talcash.node.store import Store
+from talcash.wallet.keystore import INSECURE_FAST
+from talcash.wallet.wallet import Wallet
 
 from chainutil import named_key
 

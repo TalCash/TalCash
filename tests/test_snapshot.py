@@ -2,17 +2,17 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.errors import ValidationError
-from technocoin.core.hashing import sha256
-from technocoin.core.params import MAINNET, REGTEST
-from technocoin.core.snapshot import (
+from talcash.core.errors import ValidationError
+from talcash.core.hashing import sha256
+from talcash.core.params import MAINNET, REGTEST
+from talcash.core.snapshot import (
     EMPTY_STATE_ROOT,
     NO_SNAPSHOT,
     is_snapshot_point,
     snapshot_height,
     state_root,
 )
-from technocoin.core.state import Account, MemoryState, apply_block
+from talcash.core.state import Account, MemoryState, apply_block
 
 from chainutil import TestChain, make_transfer, named_key
 

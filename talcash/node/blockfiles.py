@@ -105,7 +105,7 @@ def encode_chunk(network_id: int, index: int, first_height: int, blocks: list[by
 def decode_chunk(data: bytes) -> ChunkFile:
     """Read and fully verify a chunk file (checksum, structure, merkle root, block links)."""
     if len(data) < _HEADER_BYTES + 32 or not data.startswith(MAGIC):
-        raise ChunkError("not a TechnoCoin chunk file")
+        raise ChunkError("not a TalCash chunk file")
     body, checksum = data[:-32], data[-32:]
     if sha256(body) != checksum:
         raise ChunkError("checksum mismatch: the file is damaged or was changed")

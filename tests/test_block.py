@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.block import (
+from talcash.core.block import (
     HEADER_SIZE,
     Block,
     block_from_bytes,
@@ -10,12 +10,12 @@ from technocoin.core.block import (
     compute_merkle_root,
     header_from_bytes,
 )
-from technocoin.core.errors import ValidationError
-from technocoin.core.genesis import genesis_block
-from technocoin.core.hashing import merkle_root, sha256
-from technocoin.core.params import MAINNET, REGTEST, TESTNET, target_for
-from technocoin.core.pow import meets_target, mine, pow_hash
-from technocoin.crypto.address import BURN_PAYLOAD
+from talcash.core.errors import ValidationError
+from talcash.core.genesis import genesis_block
+from talcash.core.hashing import merkle_root, sha256
+from talcash.core.params import MAINNET, REGTEST, TESTNET, target_for
+from talcash.core.pow import meets_target, mine, pow_hash
+from talcash.crypto.address import BURN_PAYLOAD
 
 from chainutil import TestChain, make_transfer, named_key
 

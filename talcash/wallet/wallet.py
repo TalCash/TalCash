@@ -1,4 +1,4 @@
-"""A TechnoCoin wallet: one 24-word passphrase, any number of addresses.
+"""A TalCash wallet: one 24-word passphrase, any number of addresses.
 
 The wallet file (JSON) keeps the passphrase encrypted with your password. The
 list of addresses is stored in the clear so they can be shown without the
@@ -19,7 +19,7 @@ from ..crypto.address import decode_address, encode_address, payload_from_public
 from . import keystore
 from .keystore import MODERATE, KdfStrength
 
-FORMAT = "technocoin-wallet"
+FORMAT = "talcash-wallet"
 VERSION = 1
 
 
@@ -101,7 +101,7 @@ class Wallet:
         except FileNotFoundError:
             raise WalletError(f"no wallet at {path}") from None
         if data.get("format") != FORMAT or data.get("version") != VERSION:
-            raise WalletError(f"{path} is not a TechnoCoin wallet file (version {VERSION})")
+            raise WalletError(f"{path} is not a TalCash wallet file (version {VERSION})")
         if data.get("network") not in NETWORKS:
             raise WalletError(f"unknown network {data.get('network')!r} in {path}")
         addresses = [WalletAddress(int(a["index"]), a["address"]) for a in data["addresses"]]

@@ -19,19 +19,19 @@ from urllib.parse import quote
 import pytest
 from fastapi.testclient import TestClient
 
-from technocoin.core.amounts import parse_amount
-from technocoin.core.block import block_from_bytes, check_block, header_from_bytes
-from technocoin.core.errors import DecodeError, ValidationError
-from technocoin.core.params import REGTEST
-from technocoin.core.tx import check_transaction, transaction_from_bytes
-from technocoin.crypto.address import decode_address, encode_address
-from technocoin.crypto.mnemonic import mnemonic_to_entropy
-from technocoin.node.api import ApiPolicy, create_app
-from technocoin.node.blockfiles import ChunkError, decode_chunk, encode_chunk
-from technocoin.node.chain import check_chunk_file
-from technocoin.node.p2p import P2PConfig, Peer, PeerManager, ProtocolError
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
+from talcash.core.amounts import parse_amount
+from talcash.core.block import block_from_bytes, check_block, header_from_bytes
+from talcash.core.errors import DecodeError, ValidationError
+from talcash.core.params import REGTEST
+from talcash.core.tx import check_transaction, transaction_from_bytes
+from talcash.crypto.address import decode_address, encode_address
+from talcash.crypto.mnemonic import mnemonic_to_entropy
+from talcash.node.api import ApiPolicy, create_app
+from talcash.node.blockfiles import ChunkError, decode_chunk, encode_chunk
+from talcash.node.chain import check_chunk_file
+from talcash.node.p2p import P2PConfig, Peer, PeerManager, ProtocolError
+from talcash.node.service import NodeService
+from talcash.node.store import Store
 
 from chainutil import TestChain, make_transfer, named_key
 
@@ -135,7 +135,7 @@ def test_chunk_files_detect_every_change():
 
 def test_a_chunk_that_unpacks_to_gigabytes_is_refused_without_unpacking_it():
     import zlib
-    from technocoin.node import blockfiles
+    from talcash.node import blockfiles
 
     bomb = zlib.compress(bytes(blockfiles.MAX_SEGMENT_BYTES + 1), 9)  # a few hundred kB packed
     assert len(bomb) < 1_000_000
@@ -145,7 +145,7 @@ def test_a_chunk_that_unpacks_to_gigabytes_is_refused_without_unpacking_it():
 
 def test_a_segment_must_be_exactly_one_complete_zlib_stream():
     import zlib
-    from technocoin.node import blockfiles
+    from talcash.node import blockfiles
 
     packed = blockfiles._pack_segment([block.serialize() for block in CHAIN.blocks[:3]])
     assert len(blockfiles._unpack_segment(packed)) == 3

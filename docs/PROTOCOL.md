@@ -1,8 +1,8 @@
-# TechnoCoin Protocol
+# TalCash Protocol
 
 Version 1 (draft). This document is the source of truth for the consensus rules:
 anything that decides whether a transaction or block is valid. The reference
-implementation is `technocoin/core` (rules) and `technocoin/crypto` (keys and
+implementation is `talcash/core` (rules) and `talcash/crypto` (keys and
 addresses); if the two ever disagree, that is a bug to fix in one of them.
 
 Status of each part:
@@ -11,7 +11,7 @@ Status of each part:
 |---|---|
 | Amounts, encoding, hashing, addresses, transactions, blocks, PoW, difficulty, state, balance snapshots | Implemented and tested |
 | Genesis | Implemented; mainnet/testnet genesis gets mined at launch |
-| Chain selection, reorganisation, finality | Implemented in `technocoin/node/chain.py` and tested |
+| Chain selection, reorganisation, finality | Implemented in `talcash/node/chain.py` and tested |
 | Mempool policy, block templates, miner | Implemented and tested |
 | Node API (HTTP + WebSocket) | Implemented and tested |
 | Peer-to-peer: handshake, spreading blocks and transfers, catching up | Implemented and tested with several real nodes |
@@ -48,7 +48,7 @@ Status of each part:
 - **Burn address**: payload of 21 zero bytes (`tc1111111111111111111115gbLbA`). No public key
   hashes to it, so coins sent there can never move.
 
-Wallet key handling (not consensus, but every TechnoCoin wallet does it this way):
+Wallet key handling (not consensus, but every TalCash wallet does it this way):
 
 - Passphrase: standard **BIP39**, 24 English words from 256 bits of cryptographically secure randomness.
 - Seed: BIP39 PBKDF2-HMAC-SHA512 (2048 rounds, salt `"mnemonic" + optional extra passphrase`).
@@ -71,7 +71,7 @@ Wallet key handling (not consensus, but every TechnoCoin wallet does it this way
 | memo | var8 | optional note, ≤ 255 bytes |
 | signature | 64 bytes | |
 
-- `signature = Ed25519_sign(key, "TechnoCoin/tx/1\x00" || all bytes before the signature)`.
+- `signature = Ed25519_sign(key, "TalCash/tx/1\x00" || all bytes before the signature)`.
   It covers every field, including each receiver's amount.
 - `txid = H(all bytes, including the signature)`.
 - A simple one-receiver transfer is 146 bytes.
@@ -145,7 +145,7 @@ Node rule, checked only when a block first arrives (not when replaying history):
 
 ## 6. Proof of work
 
-`pow = Argon2id(password = header bytes, salt = "TechnoCoin/PoW/1", memory, iterations, lanes = 1, output = 32 bytes)`
+`pow = Argon2id(password = header bytes, salt = "TalCash/Argon2/1", memory, iterations, lanes = 1, output = 32 bytes)`
 (RFC 9106, Argon2 version 1.3). Valid if `pow` read as a big-endian integer is `≤ target`.
 
 | Network | Memory | Iterations |

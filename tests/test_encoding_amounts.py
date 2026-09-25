@@ -1,8 +1,8 @@
 import pytest
 
-from technocoin.core.amounts import COIN, MAX_AMOUNT, format_amount, parse_amount
-from technocoin.core.encoding import Reader, Writer
-from technocoin.core.errors import DecodeError
+from talcash.core.amounts import COIN, MAX_AMOUNT, format_amount, parse_amount
+from talcash.core.encoding import Reader, Writer
+from talcash.core.errors import DecodeError
 
 
 def test_integers_round_trip_big_endian():

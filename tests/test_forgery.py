@@ -13,17 +13,17 @@ from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
 
-from technocoin.core.amounts import COIN
-from technocoin.core.block import HEADER_SIZE, Block, block_from_bytes
-from technocoin.core.errors import DecodeError, ValidationError
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import mine
-from technocoin.core.tx import Output, check_transaction, transaction_from_bytes
-from technocoin.crypto.address import encode_address
-from technocoin.node.api import create_app
-from technocoin.node.chain import ChainManager, Outcome
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
+from talcash.core.amounts import COIN
+from talcash.core.block import HEADER_SIZE, Block, block_from_bytes
+from talcash.core.errors import DecodeError, ValidationError
+from talcash.core.params import REGTEST
+from talcash.core.pow import mine
+from talcash.core.tx import Output, check_transaction, transaction_from_bytes
+from talcash.crypto.address import encode_address
+from talcash.node.api import create_app
+from talcash.node.chain import ChainManager, Outcome
+from talcash.node.service import NodeService
+from talcash.node.store import Store
 
 from chainutil import TestChain, make_transfer, named_key
 

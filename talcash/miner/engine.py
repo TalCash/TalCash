@@ -93,7 +93,7 @@ class Miner:
                 target=_worker,
                 args=(i, self._jobs[i], self._results, self._current_job, self._hash_counts),
                 daemon=True,
-                name=f"technocoin-miner-{i}",
+                name=f"talcash-miner-{i}",
             )
             for i in range(self.workers)
         ]

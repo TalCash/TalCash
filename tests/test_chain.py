@@ -10,14 +10,14 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.amounts import COIN
-from technocoin.core.block import Block
-from technocoin.core.errors import ValidationError
-from technocoin.core.genesis import mine_genesis
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import meets_target
-from technocoin.node.chain import ChainManager, Outcome, all_meet_target
-from technocoin.node.store import STATUS_INVALID, Store
+from talcash.core.amounts import COIN
+from talcash.core.block import Block
+from talcash.core.errors import ValidationError
+from talcash.core.genesis import mine_genesis
+from talcash.core.params import REGTEST
+from talcash.core.pow import meets_target
+from talcash.node.chain import ChainManager, Outcome, all_meet_target
+from talcash.node.store import STATUS_INVALID, Store
 
 from chainutil import TestChain, make_transfer, named_key
 
@@ -346,7 +346,7 @@ def test_blocks_whose_headers_were_checked_skip_the_second_proof_of_work_check(m
     ref = reference(3)
     node = new_node()
     node.note_pow_checked([b.block_id for b in ref.blocks[1:]])
-    monkeypatch.setattr("technocoin.core.state.meets_target", lambda *a: pytest.fail("checked twice"))
+    monkeypatch.setattr("talcash.core.state.meets_target", lambda *a: pytest.fail("checked twice"))
     assert feed(node, ref.blocks[1:])[-1].outcome is Outcome.NEW_TIP
 
 

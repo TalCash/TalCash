@@ -2,10 +2,10 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.amounts import COIN, MAX_AMOUNT
-from technocoin.core.errors import DecodeError, ValidationError
-from technocoin.core.params import MAINNET, REGTEST
-from technocoin.core.tx import Coinbase, Output, Transfer, check_transaction, transaction_from_bytes
+from talcash.core.amounts import COIN, MAX_AMOUNT
+from talcash.core.errors import DecodeError, ValidationError
+from talcash.core.params import MAINNET, REGTEST
+from talcash.core.tx import Coinbase, Output, Transfer, check_transaction, transaction_from_bytes
 
 from chainutil import make_transfer, named_key
 

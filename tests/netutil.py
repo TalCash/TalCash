@@ -13,14 +13,14 @@ import uvicorn
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
-from technocoin.core.block import Block, block_from_bytes
-from technocoin.core.params import NetworkParams
-from technocoin.core.pow import mine
-from technocoin.core.tx import Transfer
-from technocoin.node.api import ApiPolicy, create_app
-from technocoin.node.p2p import MAX_MESSAGE_BYTES, P2PConfig
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
+from talcash.core.block import Block, block_from_bytes
+from talcash.core.params import NetworkParams
+from talcash.core.pow import mine
+from talcash.core.tx import Transfer
+from talcash.node.api import ApiPolicy, create_app
+from talcash.node.p2p import MAX_MESSAGE_BYTES, P2PConfig
+from talcash.node.service import NodeService
+from talcash.node.store import Store
 
 
 def free_port() -> int:

@@ -3,16 +3,16 @@
 import hashlib
 from dataclasses import dataclass
 
-from technocoin.core.block import BLOCK_VERSION, Block, BlockHeader, compute_merkle_root
-from technocoin.core.difficulty import median_time_past, next_target
-from technocoin.core.genesis import genesis_block
-from technocoin.core.params import NetworkParams
-from technocoin.core.pow import mine
-from technocoin.core.snapshot import NO_SNAPSHOT, is_snapshot_point, snapshot_height, state_root
-from technocoin.core.state import BlockContext, MemoryState, StateChanges, apply_block
-from technocoin.core.tx import Coinbase, Output, Transfer
-from technocoin.crypto import keys
-from technocoin.crypto.address import payload_from_public_key
+from talcash.core.block import BLOCK_VERSION, Block, BlockHeader, compute_merkle_root
+from talcash.core.difficulty import median_time_past, next_target
+from talcash.core.genesis import genesis_block
+from talcash.core.params import NetworkParams
+from talcash.core.pow import mine
+from talcash.core.snapshot import NO_SNAPSHOT, is_snapshot_point, snapshot_height, state_root
+from talcash.core.state import BlockContext, MemoryState, StateChanges, apply_block
+from talcash.core.tx import Coinbase, Output, Transfer
+from talcash.crypto import keys
+from talcash.crypto.address import payload_from_public_key
 
 
 @dataclass(frozen=True)

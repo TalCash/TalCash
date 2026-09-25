@@ -547,7 +547,7 @@ class PeerManager:
             "work": f"{tip.chain_work:x}",
             "chunks": self.service.store.sealed_chunks(),
             "listen": self.config.listen_url,
-            "agent": f"technocoin/{__version__}",
+            "agent": f"talcash/{__version__}",
         }
 
     def _handle_hello(self, peer: Peer, message: dict) -> None:

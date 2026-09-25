@@ -115,7 +115,7 @@ def create_app(
                     await task
             service.close()
 
-    app = FastAPI(title="TechnoCoin node", version=__version__, lifespan=lifespan,
+    app = FastAPI(title="TalCash node", version=__version__, lifespan=lifespan,
                   description="Amounts are strings in TC with 6 decimals. Ids are hex.")
 
     @app.exception_handler(ApiError)

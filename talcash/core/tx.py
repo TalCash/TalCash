@@ -37,7 +37,7 @@ TYPE_TRANSFER = 1
 
 MAX_OUTPUTS = 255
 MAX_MEMO_SIZE = 255
-SIGNATURE_DOMAIN = b"TechnoCoin/tx/1\x00"
+SIGNATURE_DOMAIN = b"TalCash/tx/1\x00"
 
 
 @dataclass(frozen=True)

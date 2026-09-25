@@ -9,15 +9,15 @@ import httpx
 import pytest
 import uvicorn
 
-from technocoin.cli import main
-from technocoin.core.block import Block, block_from_bytes
-from technocoin.core.params import REGTEST
-from technocoin.core.pow import mine
-from technocoin.node.api import create_app
-from technocoin.node.service import NodeService
-from technocoin.node.store import Store
-from technocoin.wallet.keystore import INSECURE_FAST
-from technocoin.wallet.wallet import Wallet
+from talcash.cli import main
+from talcash.core.block import Block, block_from_bytes
+from talcash.core.params import REGTEST
+from talcash.core.pow import mine
+from talcash.node.api import create_app
+from talcash.node.service import NodeService
+from talcash.node.store import Store
+from talcash.wallet.keystore import INSECURE_FAST
+from talcash.wallet.wallet import Wallet
 
 PARAMS = replace(REGTEST, coinbase_maturity=3)
 PASSWORD = "password123"

@@ -1,6 +1,6 @@
 """SLIP-0010 key derivation for Ed25519: one seed -> many private keys.
 
-TechnoCoin wallets derive key number `index` at path m/44'/84184'/account'/index'
+TalCash wallets derive key number `index` at path m/44'/84184'/account'/index'
 (every level hardened, which Ed25519 requires).
 """
 

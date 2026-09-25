@@ -4,12 +4,12 @@ from dataclasses import replace
 
 import pytest
 
-from technocoin.core.amounts import COIN
-from technocoin.core.block import Block, compute_merkle_root
-from technocoin.core.errors import ValidationError
-from technocoin.core.params import MAINNET, REGTEST, target_for
-from technocoin.core.pow import meets_target
-from technocoin.core.state import apply_block, check_not_in_future
+from talcash.core.amounts import COIN
+from talcash.core.block import Block, compute_merkle_root
+from talcash.core.errors import ValidationError
+from talcash.core.params import MAINNET, REGTEST, target_for
+from talcash.core.pow import meets_target
+from talcash.core.state import apply_block, check_not_in_future
 
 from chainutil import TestChain, make_transfer, named_key
 

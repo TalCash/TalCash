@@ -2,14 +2,14 @@ import json
 
 import pytest
 
-from technocoin.cli import main
-from technocoin.core.params import MAINNET, REGTEST
-from technocoin.core.tx import check_transaction
-from technocoin.crypto import mnemonic
-from technocoin.crypto.address import decode_address
-from technocoin.wallet import keystore
-from technocoin.wallet.keystore import INSECURE_FAST, WrongPassword
-from technocoin.wallet.wallet import Wallet, WalletError
+from talcash.cli import main
+from talcash.core.params import MAINNET, REGTEST
+from talcash.core.tx import check_transaction
+from talcash.crypto import mnemonic
+from talcash.crypto.address import decode_address
+from talcash.wallet import keystore
+from talcash.wallet.keystore import INSECURE_FAST, WrongPassword
+from talcash.wallet.wallet import Wallet, WalletError
 
 PASSWORD = "correct horse battery"
 TEST_PHRASE = " ".join(["abandon"] * 11 + ["about"])
