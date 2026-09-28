@@ -1,5 +1,6 @@
 """Rate limits, shared by the API and the peer-to-peer layer."""
 
+import asyncio
 import ipaddress
 import time
 from collections import OrderedDict
@@ -12,8 +13,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 class BodyLimitMiddleware:
     """Bound actual HTTP body bytes before a JSON parser can buffer them."""
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int, *, body_timeout: float = 30) -> None:
         self.app, self.max_bytes = app, max_bytes
+        self.body_timeout = body_timeout
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -36,17 +38,34 @@ class BodyLimitMiddleware:
                     return
 
         body = bytearray()
-        while True:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                return
-            chunk = message.get("body", b"")
-            if len(body) + len(chunk) > self.max_bytes:
-                await reject()
-                return
-            body.extend(chunk)
-            if not message.get("more_body", False):
-                break
+        too_large = False
+        try:
+            # One deadline for the complete body: sending a byte now and then
+            # must not let a client hold a connection slot indefinitely.
+            async with asyncio.timeout(self.body_timeout):
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        return
+                    chunk = message.get("body", b"")
+                    if len(body) + len(chunk) > self.max_bytes:
+                        too_large = True
+                        break
+                    body.extend(chunk)
+                    if not message.get("more_body", False):
+                        break
+        except TimeoutError:
+            headers = {"Connection": "close"} if scope.get("http_version", "1.1").startswith("1.") else {}
+            response = JSONResponse(
+                {"error": "request-timeout", "detail": "request body was not received in time"},
+                status_code=408, headers=headers,
+            )
+            await response(scope, receive, send)
+            return
+
+        if too_large:
+            await reject()
+            return
 
         delivered = False
 
