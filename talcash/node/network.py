@@ -33,6 +33,10 @@ def load_params(name: str, base: Path | None = None, *, create: bool = True) -> 
             raise RuntimeError(f"no devnet at {path.parent} yet")
         _create_devnet_genesis(path)
     data = json.loads(path.read_text(encoding="utf-8"))
+    return _devnet_params(data)
+
+
+def _devnet_params(data: dict) -> NetworkParams:
     return replace(
         DEVNET,
         genesis_timestamp=int(data["timestamp"]),
@@ -61,12 +65,21 @@ def has_devnet(base: Path | None = None) -> bool:
 def join_devnet(peer_url: str, base: Path | None = None) -> None:
     """Copy the genesis of the devnet that `peer_url` (ws://host:port/v1/p2p) belongs to."""
     api = peer_url.replace("wss://", "https://").replace("ws://", "http://").split("/v1/")[0]
-    data = httpx.get(f"{api}/v1/genesis", timeout=10).json()
-    if data.get("network") != DEVNET.name:
+    try:
+        response = httpx.get(f"{api}/v1/genesis", timeout=10)
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        raise RuntimeError(f"couldn't fetch devnet genesis from {peer_url}: {error}") from None
+    data = response.json()
+    if not isinstance(data, dict) or data.get("network") != DEVNET.name:
         raise RuntimeError(f"{peer_url} isn't a devnet node")
-    genesis = {key: data[key] for key in ("timestamp", "message", "nonce", "id")}
+    # Validate the downloaded candidate before changing any local configuration.
+    try:
+        genesis = {key: data[key] for key in ("timestamp", "message", "nonce", "id")}
+        genesis_block(_devnet_params(genesis))
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise RuntimeError(f"invalid devnet genesis from {peer_url}: {error}") from None
     _write_genesis(network_dir(DEVNET.name, base) / GENESIS_FILE, genesis)
-    genesis_block(load_params(DEVNET.name, base, create=False))  # must rebuild to exactly that genesis id
 
 
 def _write_genesis(path: Path, data: dict) -> None:
