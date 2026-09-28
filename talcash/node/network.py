@@ -68,9 +68,11 @@ def join_devnet(peer_url: str, base: Path | None = None) -> None:
     try:
         response = httpx.get(f"{api}/v1/genesis", timeout=10)
         response.raise_for_status()
+        data = response.json()
     except httpx.HTTPError as error:
         raise RuntimeError(f"couldn't fetch devnet genesis from {peer_url}: {error}") from None
-    data = response.json()
+    except ValueError:
+        raise RuntimeError(f"{peer_url} didn't answer with a devnet genesis") from None
     if not isinstance(data, dict) or data.get("network") != DEVNET.name:
         raise RuntimeError(f"{peer_url} isn't a devnet node")
     # Validate the downloaded candidate before changing any local configuration.

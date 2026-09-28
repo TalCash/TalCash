@@ -75,3 +75,12 @@ def test_failed_join_reports_a_cli_error(tmp_path, monkeypatch, capsys):
     assert main(["--network", "devnet", "--datadir", str(tmp_path), "node", "--peer", "ws://peer/v1/p2p"]) == 1
     assert "couldn't fetch devnet genesis" in capsys.readouterr().err
     assert not network.has_devnet(tmp_path)
+
+
+def test_an_answer_that_is_not_json_is_a_clear_error(tmp_path, monkeypatch):
+    response = httpx.Response(200, text="<html>not a TalCash node</html>",
+                              request=httpx.Request("GET", "http://peer/v1/genesis"))
+    monkeypatch.setattr(network.httpx, "get", lambda *args, **kwargs: response)
+    with pytest.raises(RuntimeError, match="didn't answer with a devnet genesis"):
+        network.join_devnet("ws://peer/v1/p2p", tmp_path)
+    assert not network.has_devnet(tmp_path)
