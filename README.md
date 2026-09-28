@@ -134,6 +134,8 @@ tc wallet scan [--gap N]     find addresses you used before
 tc wallet show-passphrase    your 24 words again
 tc wallet balance            available, incoming, outgoing, unlocking
 tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...] [--fee X] [--from N] [--memo TEXT] [--wait] [--yes]
+tc wallet send talcash:LINK [AMOUNT]                 pay a payment link
+tc wallet request [AMOUNT] [--memo TEXT] [--label NAME]   make a payment link for your address
 tc wallet history
 ```
 
@@ -142,6 +144,10 @@ before `wallet` for other networks. Wallets live in `~/.talcash/<network>/wallet
 with `--datadir` or `TALCASH_HOME`). Commands that need a node talk to the one on this computer,
 else to the network's public node (testnet: https://testnet.talcash.com); use
 `wallet --node http://host:port ...` for another.
+
+Payment links work like Bitcoin's `bitcoin:` links: `talcash:ADDRESS?amount=12.5&memo=order%2017`
+asks for 12.5 TC with a note. Put one on a web page, in a QR code or on an NFC tag; any TalCash
+wallet can pay it. The format is in [docs/PROTOCOL.md](docs/PROTOCOL.md), section 17.
 
 All your addresses come from your 24 words, in order (#0, #1, ...). After a restore the wallet
 asks the node which of them were used and adds them, stopping after 20 unused ones in a row (the

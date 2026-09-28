@@ -18,6 +18,7 @@ Status of each part:
 | Block files and sealed chunk files, rebuild from files, reader | Implemented and tested (section 12) |
 | Catching up by downloading chunk files, remembered peers | Implemented and tested with several real nodes |
 | Hardening: headers-first sync, per-peer limits and bans, public API mode | Implemented; tested with real nodes, hostile hand-written peers and fuzzing |
+| Payment links (`talcash:`), shared test cases | Implemented and tested (section 17) |
 | Mega chunks, fast sync from snapshots, pruning | Planned (section 12) |
 
 ---
@@ -479,3 +480,37 @@ types are ignored, so later versions can add messages.
   them off. The wallet likewise falls back to the network's public node API
   (`https://testnet.talcash.com`) when none answers on this computer, and refuses a suggested
   fee above 1,000 base units per byte unless the user sets `--fee`.
+
+## 17. Payment links (`talcash:`)
+
+Not consensus, but every TalCash wallet reads them the same way, so a link on a web page, in a QR
+code or on an NFC tag can be paid from any wallet. The reference implementation is
+`talcash/wallet/payment_link.py`; **`docs/payment-links.json` has test cases** (valid links with
+what they mean, invalid links with why) that every implementation should pass.
+
+```
+talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=12.5&memo=order%20%2317&label=Caf%C3%A9%20Tal
+```
+
+- `talcash:` (any letter case) followed directly by an address (no `//`). The address says which
+  network the link is for (`tc1` mainnet, `tt1` testnet, ...); a wallet refuses a link for another
+  network. Spaces, tabs and line breaks at either end are ignored, nothing else.
+- Optional parameters after `?`, separated by `&`, each `name=value`. Names are lowercase
+  (`a-z`, `0-9`, `-`). Values are %-encoded UTF-8 and never empty; `+` is a plus sign (a space is
+  `%20`); `#` must be written `%23`, because browsers cut links at `#`.
+  - `amount`: TC as digits with an optional point and up to 6 decimals (`12.5`, `0.000001`), more
+    than 0. Without it the payer chooses the amount.
+  - `memo`: the note the payment should carry, up to 255 bytes; it is stored on the chain (public).
+    Shops use it to match payments to orders.
+  - `label`: a name for the receiver, up to 100 characters, only shown to the payer. Anyone can
+    write any name, so wallets show it as the link's claim next to the address, never instead of it.
+  - Other names are ignored, except names starting with `req-`: a wallet that doesn't know such
+    a parameter must refuse the link (room for future requirements, as in Bitcoin's BIP21).
+- A link is refused if anything is off: a parameter twice, an empty part (`&&`, a trailing `?` or
+  `&`), a broken %-escape, text that isn't UTF-8, control characters or right-to-left overrides
+  in a value (they can make text display differently from what it is), or more than 2,048
+  characters in all. Strict on purpose: two wallets must never read one link differently.
+- NFC: the link is an NDEF URI record (prefix code 0, the full link as the text). Web pages that
+  want to open a wallet can register `web+talcash:` with the same syntax after the colon.
+- `tc wallet request [AMOUNT] [--memo TEXT] [--label NAME]` prints a link for your address;
+  `tc wallet send LINK [AMOUNT]` pays one.

@@ -8,6 +8,8 @@
     tc wallet show-passphrase        show your 24 words again
     tc wallet balance                balances (asks the node)
     tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...]    send coins (one or many receivers)
+    tc wallet send talcash:LINK [AMOUNT]                   pay a payment link
+    tc wallet request [AMOUNT] [--memo TEXT] [--label NAME]  make a payment link for your address
     tc wallet history                recent transactions
     tc node [--mine [ADDRESS]] [--peer URL ...]   run a node, optionally mining (to your wallet by default)
     tc devnet [--nodes 3] [--miners 2]            a whole local network of devnet nodes
@@ -45,6 +47,7 @@ from .paths import network_dir
 from .public_nodes import PUBLIC_API, SEEDS
 from .wallet.client import NodeClient, NodeError
 from .wallet.keystore import WrongPassword
+from .wallet.payment_link import PaymentRequest, is_link, parse_link
 from .wallet.wallet import GAP_LIMIT, Wallet, WalletError
 
 MIN_PASSWORD_LENGTH = 8
@@ -253,14 +256,35 @@ def _parse_payments(words: list[str], params: NetworkParams) -> list[tuple[str, 
     return payments
 
 
+def _pay_link(words: list[str], memo: str | None, params: NetworkParams) -> tuple[list, str | None, str | None]:
+    """`talcash:...` or `talcash:... AMOUNT` -> (payments, memo, label)."""
+    request = parse_link(words[0], params)
+    if len(words) > 2:
+        raise CommandError("give a payment link alone, or the link and an amount")
+    if request.amount is not None and len(words) == 2:
+        raise CommandError(f"the payment link already asks for {format_amount(request.amount)} TC")
+    if request.amount is None and len(words) == 1:
+        raise CommandError("the payment link has no amount; add one: tc wallet send LINK AMOUNT")
+    units = request.amount if request.amount is not None else parse_amount(words[1])
+    if units == 0:
+        raise CommandError("the amount must be more than 0")
+    if request.memo is not None and memo is not None:
+        raise CommandError("the payment link already sets the memo")
+    payload = decode_address(request.address, params.address_prefix)
+    return [(request.address, payload, units)], request.memo if request.memo is not None else memo, request.label
+
+
 def cmd_send(args: argparse.Namespace, params: NetworkParams) -> int:
     wallet = _load(args, params)
     sender = next((a for a in wallet.addresses if a.index == args.from_index), None)
     if sender is None:
         raise CommandError(f"the wallet has no address #{args.from_index}")
-    payments = _parse_payments(args.payments, params)
+    if is_link(args.payments[0]):
+        payments, memo_text, label = _pay_link(args.payments, args.memo, params)
+    else:
+        payments, memo_text, label = _parse_payments(args.payments, params), args.memo, None
     total = sum(units for _, _, units in payments)
-    memo = (args.memo or "").encode("utf-8")
+    memo = (memo_text or "").encode("utf-8")
     if len(memo) > MAX_MEMO_SIZE:
         raise CommandError(f"the memo can be at most {MAX_MEMO_SIZE} bytes")
 
@@ -284,10 +308,12 @@ def cmd_send(args: argparse.Namespace, params: NetworkParams) -> int:
     print(f"From:   {sender.address} (#{sender.index})")
     for text, _, units in payments:
         print(f"To:     {text}  {format_amount(units)} TC")
+    if label:
+        print(f"Name:   {label}  (written in the link by whoever made it; nobody checks it)")
     print(f"Fee:    {format_amount(fee)} TC")
     print(f"Total:  {format_amount(total + fee)} TC")
     if memo:
-        print(f"Memo:   {args.memo}")
+        print(f"Memo:   {memo_text}")
     if not args.yes and input("Send? [y/N] ").strip().lower() not in ("y", "yes"):
         print("Cancelled.")
         return 1
@@ -305,6 +331,19 @@ def cmd_send(args: argparse.Namespace, params: NetworkParams) -> int:
                 return 0
             time.sleep(1)
         print("Not mined yet; check later with `tc wallet history`.")
+    return 0
+
+
+def cmd_request(args: argparse.Namespace, params: NetworkParams) -> int:
+    wallet = _load(args, params)
+    receiver = next((a for a in wallet.addresses if a.index == args.address), None)
+    if receiver is None:
+        raise CommandError(f"the wallet has no address #{args.address}")
+    amount = parse_amount(args.amount) if args.amount is not None else None
+    if amount == 0:
+        raise CommandError("the amount must be more than 0 (or leave it out to let the payer choose)")
+    link = PaymentRequest(params.name, receiver.address, amount, args.memo, args.label).to_link()
+    print(link)
     return 0
 
 
@@ -435,7 +474,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     send = wallet_commands.add_parser("send", help="send coins to one or more addresses in one payment")
     send.add_argument("payments", nargs="+", metavar="ADDRESS AMOUNT",
-                      help="receiver and amount in TC, e.g. td1... 12.5 (repeat for more receivers)")
+                      help="receiver and amount in TC, e.g. td1... 12.5 (repeat for more receivers); "
+                           "or a talcash: payment link (and an amount if the link has none)")
     send.add_argument("--fee", help="fee in TC (default: the node's minimum)")
     send.add_argument("--from", dest="from_index", type=int, default=0, help="send from address #N (default 0)")
     send.add_argument("--memo", help="a short note stored with the payment (public)")
@@ -447,6 +487,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--gap", type=int, default=GAP_LIMIT,
                       help=f"stop after this many unused addresses in a row (default {GAP_LIMIT})")
     scan.set_defaults(handler=cmd_scan)
+
+    request = wallet_commands.add_parser("request", help="make a payment link (for a web page, QR code or NFC tag)")
+    request.add_argument("amount", nargs="?", help="amount in TC (default: the payer chooses)")
+    request.add_argument("--memo", help="a note the payment should carry, e.g. an order number (public)")
+    request.add_argument("--label", help="your name as the payer's wallet should show it")
+    request.add_argument("--address", type=int, default=0, help="receive on address #N (default 0)")
+    request.set_defaults(handler=cmd_request)
 
     history = wallet_commands.add_parser("history", help="recent transactions")
     history.add_argument("--limit", type=int, default=20)
@@ -491,6 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        # A memo or name with characters the console can't show (e.g. an emoji on an old Windows
+        # code page) is printed with "?" instead of failing halfway through a command.
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     try:
         return args.handler(args, NETWORKS[args.network])

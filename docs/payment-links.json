@@ -1,0 +1,86 @@
+{
+  "about": "Test cases for TalCash payment links (docs/PROTOCOL.md, section 17). Every wallet should read each valid link exactly as given here (amount in base units, 1 TC = 1000000; null = not in the link) and refuse each invalid one. The addresses belong to the test passphrase 'abandon' x23 + 'art' (#0 and #1).",
+  "valid": [
+    {
+      "link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "network": "testnet", "address": "tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "amount": null, "memo": null, "label": null
+    },
+    {
+      "link": "talcash:tc1BfvB8KSm1VTToN85j3Po4pWZcct8okRhk?amount=12.5",
+      "network": "mainnet", "address": "tc1BfvB8KSm1VTToN85j3Po4pWZcct8okRhk",
+      "amount": 12500000, "memo": null, "label": null
+    },
+    {
+      "link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=12.5&memo=order%20%2317%20%E2%98%95&label=Caf%C3%A9%20Tal",
+      "network": "testnet", "address": "tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "amount": 12500000, "memo": "order #17 ☕", "label": "Café Tal"
+    },
+    {
+      "comment": "the scheme is case-insensitive; the smallest amount",
+      "link": "TalCash:tt1CZmAqNSJ8YcXbVVEVrRwQKf748884oRDE?amount=0.000001",
+      "network": "testnet", "address": "tt1CZmAqNSJ8YcXbVVEVrRwQKf748884oRDE",
+      "amount": 1, "memo": null, "label": null
+    },
+    {
+      "comment": "parameters in any order; leading zeros are fine",
+      "link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?label=Shop&amount=007.50",
+      "network": "testnet", "address": "tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "amount": 7500000, "memo": null, "label": "Shop"
+    },
+    {
+      "comment": "+ is a plus sign, not a space",
+      "link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?memo=a+b",
+      "network": "testnet", "address": "tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "amount": null, "memo": "a+b", "label": null
+    },
+    {
+      "comment": "values are %-decoded before they are read, and characters beyond ASCII may also appear unencoded",
+      "link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=%31%32&memo=café",
+      "network": "testnet", "address": "tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "amount": 12000000, "memo": "café", "label": null
+    },
+    {
+      "comment": "unknown parameters are ignored (but must still be well formed)",
+      "link": "talcash:tc1BfvB8KSm1VTToN85j3Po4pWZcct8okRhk?amount=1&message=thanks",
+      "network": "mainnet", "address": "tc1BfvB8KSm1VTToN85j3Po4pWZcct8okRhk",
+      "amount": 1000000, "memo": null, "label": null
+    },
+    {
+      "comment": "spaces, tabs and line breaks at either end are ignored",
+      "link": " talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=1\r\n",
+      "network": "testnet", "address": "tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes",
+      "amount": 1000000, "memo": null, "label": null
+    }
+  ],
+  "invalid": [
+    {"link": "bitcoin:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes", "why": "another scheme"},
+    {"link": "talcash:", "why": "no address"},
+    {"link": "talcash://tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes", "why": "no // after the scheme"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wet", "why": "address checksum"},
+    {"link": "talcash:tx1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes", "why": "unknown address prefix"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=0", "why": "zero amount"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=-1", "why": "negative amount"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=1e3", "why": "exponent"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=1,5", "why": "comma"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=.5", "why": "no digit before the point"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=5.", "why": "no digit after the point"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=1.1234567", "why": "more than 6 decimals"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=%201", "why": "space in the amount"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=9223372036855", "why": "more than the largest amount"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=1&amount=2", "why": "a parameter twice"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?req-expires=1790000000", "why": "unknown required parameter"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?memo=", "why": "empty value"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount", "why": "no = sign"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?", "why": "empty query"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?amount=1&", "why": "empty part"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?AMOUNT=1", "why": "names are lowercase"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?memo=100%", "why": "broken %-escape"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?memo=%E2%98", "why": "not UTF-8"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?memo=a%0Ab", "why": "control character"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?label=%E2%80%AEpohS", "why": "right-to-left override"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?message=%ZZ", "why": "an ignored parameter must still be well formed"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes?memo=order#17", "why": "unencoded #"},
+    {"link": "talcash:tt1BfvB8KSm1VTToN85j3Po4pWZcct6R3wes ", "why": "only spaces, tabs and line breaks are ignored at the ends, not a no-break space (JavaScript's trim() would remove it)"}
+  ]
+}
