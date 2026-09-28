@@ -82,13 +82,13 @@ def all_meet_target(headers: list[BlockHeader], pow_params: PowParams) -> bool:
         return all(pool.map(lambda h: meets_target(h, pow_params), headers))
 
 
-def check_chunk_file(data: bytes, params: NetworkParams) -> CheckedChunk:
+def check_chunk_file(data: bytes, params: NetworkParams, *, max_decoded_bytes: int | None = None) -> CheckedChunk:
     """File integrity, shape and every block's proof of work (on all cores).
 
     Touches no database, so a node can run it in a background thread while it keeps serving.
     Raises ChunkError or ValidationError.
     """
-    chunk = decode_chunk(data, max_blocks=params.chunk_size)
+    chunk = decode_chunk(data, max_blocks=params.chunk_size, max_decoded_bytes=max_decoded_bytes)
     if chunk.network_id != params.network_id:
         raise ValidationError("wrong-network", "chunk is from another network")
     if chunk.first_height != chunk.index * params.chunk_size or len(chunk.blocks) != params.chunk_size:

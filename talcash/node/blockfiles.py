@@ -44,6 +44,10 @@ class ChunkError(ValueError):
     """A chunk file is damaged, altered, or not a chunk file."""
 
 
+class ChunkTooLarge(ChunkError):
+    """A valid chunk may exceed the node's in-memory synchronization budget."""
+
+
 @dataclass(frozen=True)
 class ChunkLocation:
     """Where a block sits inside a chunk file."""
@@ -72,9 +76,13 @@ def _pack_segment(blocks: list[bytes]) -> bytes:
     return zlib.compress(b"".join(len(b).to_bytes(4, "big") + b for b in blocks), 6)
 
 
-def _unpack_segment(data: bytes) -> list[bytes]:
+def _unpack_segment(data: bytes, *, max_bytes: int = MAX_SEGMENT_BYTES) -> list[bytes]:
     unpacker = zlib.decompressobj()
-    raw = unpacker.decompress(data, MAX_SEGMENT_BYTES)
+    raw = unpacker.decompress(data, min(max_bytes, MAX_SEGMENT_BYTES) + 1)
+    if len(raw) > MAX_SEGMENT_BYTES:
+        raise zlib.error("segment unpacks to more than 64 full blocks")
+    if len(raw) > max_bytes:
+        raise ChunkTooLarge("chunk exceeds the decoded byte budget")
     if unpacker.unconsumed_tail:
         raise zlib.error("segment unpacks to more than 64 full blocks")
     if not unpacker.eof or unpacker.unused_data:
@@ -106,7 +114,8 @@ def encode_chunk(network_id: int, index: int, first_height: int, blocks: list[by
     return body + sha256(body), locations
 
 
-def decode_chunk(data: bytes, *, max_blocks: int | None = None) -> ChunkFile:
+def decode_chunk(data: bytes, *, max_blocks: int | None = None,
+                 max_decoded_bytes: int | None = None) -> ChunkFile:
     """Read and fully verify a chunk file (checksum, structure, merkle root, block links)."""
     if len(data) < _HEADER_BYTES + 32 or not data.startswith(MAGIC):
         raise ChunkError("not a TalCash chunk file")
@@ -135,8 +144,11 @@ def decode_chunk(data: bytes, *, max_blocks: int | None = None) -> ChunkFile:
         if expected_offset != len(body):
             raise ChunkError("extra bytes after segments")
         blocks, locations = [], []
+        decoded_bytes = 0
         for offset, length in table:
-            group = _unpack_segment(body[offset:offset + length])
+            remaining = MAX_SEGMENT_BYTES if max_decoded_bytes is None else max_decoded_bytes - decoded_bytes
+            group = _unpack_segment(body[offset:offset + length], max_bytes=remaining)
+            decoded_bytes += sum(len(block) + 4 for block in group)
             if len(group) != min(SEGMENT_BLOCKS, count - len(blocks)):
                 raise ChunkError("wrong number of blocks in segment")
             blocks.extend(group)

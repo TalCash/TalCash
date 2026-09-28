@@ -328,11 +328,11 @@ def create_app(
                             or websockets.total() >= policy.max_websockets):
             await socket.close(code=1013)  # try again later
             return
-        await socket.accept()
-        subscription = service.events.subscribe()
-        max_topics = MAX_TOPICS if trusted else policy.stranger_topics
+        # Reserve before accept() yields, so simultaneous handshakes count too.
         if not trusted:
             websockets[host] += 1
+        subscription = service.events.subscribe()
+        max_topics = MAX_TOPICS if trusted else policy.stranger_topics
 
         async def read() -> None:
             while True:
@@ -359,12 +359,15 @@ def create_app(
             while not subscription.overflowed:
                 await socket.send_json(await subscription.queue.get())
 
-        tasks = {asyncio.create_task(read()), asyncio.create_task(write())}
+        tasks = set()
         try:
+            await socket.accept()
+            tasks = {asyncio.create_task(read()), asyncio.create_task(write())}
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in tasks:
                 task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             service.events.unsubscribe(subscription)
             if not trusted:
                 websockets[host] -= 1

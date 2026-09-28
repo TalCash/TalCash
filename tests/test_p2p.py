@@ -165,8 +165,8 @@ def test_a_damaged_chunk_gets_the_peer_dropped_and_another_peer_is_used(nodes, m
 
     real_download, calls = p2p.download_chunk, []
 
-    async def first_download_damaged(http_base, index, max_bytes):
-        data = await real_download(http_base, index, max_bytes)
+    async def first_download_damaged(http_base, index, max_bytes, **kwargs):
+        data = await real_download(http_base, index, max_bytes, **kwargs)
         calls.append(http_base)
         if len(calls) == 1:
             data = data[:-1] + bytes([data[-1] ^ 1])  # break the checksum
@@ -218,3 +218,25 @@ def test_a_node_listed_as_its_own_peer_ignores_itself(nodes):
     time.sleep(3)
     assert lonely.peer_count() == 0
     assert not any("connected to" in line for line in lonely.log)
+
+
+@pytest.mark.parametrize("budget_type", ["download", "decoded"])
+def test_large_chunks_fall_back_to_blocks_without_banning_peer(nodes, monkeypatch, budget_type):
+    import httpx
+    from talcash.node.blockfiles import decode_chunk
+
+    a = nodes("a", params=CHUNKY)
+    a.mine(text(ALICE), 60)
+    if budget_type == "download":
+        budget = 1
+    else:
+        data = httpx.get(a.url + "/v1/chunks/0").content
+        chunk = decode_chunk(data)
+        budget = sum(len(block) + 4 for block in chunk.blocks) - 1
+        assert len(data) < budget  # download fits; decoded contents do not
+    monkeypatch.setattr(p2p, "MAX_SYNC_CHUNK_BYTES", budget)
+    late = nodes("late", peers=[a], params=CHUNKY)
+    wait_until(lambda: late.height() == 60 and same_tip(a, late), "block-by-block fallback")
+    assert late.peer_count() == 1
+    assert not any("banned" in line for line in late.log)
+    assert any("going block by block" in line for line in late.log)

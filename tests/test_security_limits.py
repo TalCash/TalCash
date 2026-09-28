@@ -100,3 +100,15 @@ def test_chunk_network_block_limit_is_checked_before_decompression(monkeypatch):
 def test_segment_rejects_invalid_records(raw):
     with pytest.raises(zlib.error):
         blockfiles._unpack_segment(zlib.compress(raw))
+
+
+def test_decoded_chunk_budget_applies_across_segments():
+    from chainutil import TestChain
+    chain = TestChain(REGTEST)
+    chain.mine_blocks(64)
+    raw = [block.serialize() for block in chain.blocks]
+    data, _ = blockfiles.encode_chunk(REGTEST.network_id, 0, 0, raw)
+    total = sum(len(block) + 4 for block in raw)
+    with pytest.raises(blockfiles.ChunkTooLarge, match="decoded byte budget"):
+        blockfiles.decode_chunk(data, max_decoded_bytes=total - 1)
+    assert blockfiles.decode_chunk(data, max_decoded_bytes=total).blocks == raw
