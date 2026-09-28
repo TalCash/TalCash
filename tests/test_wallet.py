@@ -128,6 +128,23 @@ def test_keystore_round_trip():
         keystore.decrypt({**blob, "memlimit": 1 << 40}, "pw")
 
 
+@pytest.mark.parametrize("field,value", [
+    ("opslimit", 2**32 - 1), ("opslimit", 0), ("opslimit", -1),
+    ("opslimit", True), ("opslimit", "3"), ("opslimit", 1.5),
+    ("memlimit", 0), ("memlimit", -1), ("memlimit", True),
+    ("memlimit", "8192"), ("memlimit", 8192.5),
+])
+def test_unsafe_wallet_kdf_is_rejected_before_work(field, value, monkeypatch):
+    blob = keystore.encrypt(b"secret", "pw", INSECURE_FAST)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsafe parameters reached Argon2")
+
+    monkeypatch.setattr(keystore, "_key", forbidden)
+    with pytest.raises(ValueError, match="limit"):
+        keystore.decrypt({**blob, field: value}, "pw")
+
+
 def test_cli_create_and_list(tmp_path, monkeypatch, capsys):
     """Runs the real command with the real (slow) password stretching."""
     answers = iter([PASSWORD, PASSWORD])

@@ -14,6 +14,7 @@ from nacl.exceptions import CryptoError
 KDF_NAME = "argon2id"
 CIPHER_NAME = "xsalsa20-poly1305"
 _MAX_MEMLIMIT = 1 << 30  # refuse wallet files that demand absurd memory
+_MAX_OPSLIMIT = pwhash.argon2id.OPSLIMIT_SENSITIVE
 
 
 class WrongPassword(Exception):
@@ -56,9 +57,12 @@ def encrypt(plaintext: bytes, password: str, strength: KdfStrength = MODERATE) -
 def decrypt(blob: dict, password: str) -> bytes:
     if blob.get("kdf") != KDF_NAME or blob.get("cipher") != CIPHER_NAME:
         raise ValueError("unsupported wallet encryption")
-    strength = KdfStrength(int(blob["opslimit"]), int(blob["memlimit"]))
-    if strength.memlimit > _MAX_MEMLIMIT:
-        raise ValueError("wallet file asks for too much memory")
+    opslimit, memlimit = blob["opslimit"], blob["memlimit"]
+    if type(opslimit) is not int or not pwhash.argon2id.OPSLIMIT_MIN <= opslimit <= _MAX_OPSLIMIT:
+        raise ValueError("wallet file has an unsafe operation limit")
+    if type(memlimit) is not int or not pwhash.argon2id.MEMLIMIT_MIN <= memlimit <= _MAX_MEMLIMIT:
+        raise ValueError("wallet file has an unsafe memory limit")
+    strength = KdfStrength(opslimit, memlimit)
     box = secret.SecretBox(_key(password, bytes.fromhex(blob["salt"]), strength))
     try:
         return box.decrypt(bytes.fromhex(blob["data"]))
