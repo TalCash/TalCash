@@ -161,3 +161,71 @@ def test_cli_create_and_list(tmp_path, monkeypatch, capsys):
     assert main(["--datadir", str(tmp_path), "wallet", "--file", str(tmp_path / "regtest" / "wallet.json"),
                  "addresses"]) == 1
     assert "use --network regtest" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("restore", [False, True])
+def test_concurrent_wallet_creation_never_overwrites(tmp_path, monkeypatch, restore):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    original = keystore.encrypt
+    phrases = [mnemonic.generate(24), mnemonic.generate(24)]
+
+    def encrypt(*args, **kwargs):
+        result = original(*args, **kwargs)
+        barrier.wait(timeout=10)  # both creators have passed the existence check
+        return result
+
+    monkeypatch.setattr(keystore, "encrypt", encrypt)
+    path = tmp_path / "wallet.json"
+
+    def create(index):
+        try:
+            if restore:
+                wallet = Wallet.restore(path, REGTEST, phrases[index], PASSWORD, strength=INSECURE_FAST)
+                return wallet, phrases[index]
+            return Wallet.create(path, REGTEST, PASSWORD, strength=INSECURE_FAST)
+        except WalletError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, range(2)))
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    assert Wallet.load(path).reveal_passphrase(PASSWORD) == winners[0][1]
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_failed_wallet_update_preserves_original_and_cleans_temporary(tmp_path, monkeypatch):
+    wallet, phrase = make(tmp_path)
+    original = wallet.path.read_bytes()
+
+    def fail(*args):
+        raise OSError("disk error")
+
+    monkeypatch.setattr("talcash.wallet.wallet.os.replace", fail)
+    with pytest.raises(OSError, match="disk error"):
+        wallet.save()
+    assert wallet.path.read_bytes() == original
+    assert Wallet.load(wallet.path).reveal_passphrase(PASSWORD) == phrase
+    assert list(tmp_path.iterdir()) == [wallet.path]
+
+
+def test_wallet_save_does_not_touch_predictable_temporary_path(tmp_path):
+    sentinel = tmp_path / "wallet.json.tmp"
+    sentinel.write_bytes(b"belongs to another process")
+    wallet, _ = make(tmp_path)
+    wallet.new_address(PASSWORD)
+    assert sentinel.read_bytes() == b"belongs to another process"
+
+
+def test_wallet_creation_fails_safely_when_publication_fails(tmp_path, monkeypatch):
+    import os
+    def unsupported(*args):
+        raise OSError("publication unsupported")
+
+    monkeypatch.setattr("talcash.wallet.wallet.os." + ("rename" if os.name == "nt" else "link"), unsupported)
+    with pytest.raises(OSError, match="unsupported"):
+        make(tmp_path)
+    assert not list(tmp_path.iterdir())

@@ -8,6 +8,7 @@ addresses and checks them against that list first.
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,7 +91,7 @@ class Wallet:
         encrypted = keystore.encrypt(secret, password, strength)
         seed = mnemonic.to_seed(phrase, extra)
         wallet = cls(path, params, encrypted, [WalletAddress(0, _derive_address(seed, 0, params))], int(time.time()))
-        wallet.save()
+        wallet.save(overwrite=False)
         return wallet
 
     @classmethod
@@ -107,8 +108,8 @@ class Wallet:
         addresses = [WalletAddress(int(a["index"]), a["address"]) for a in data["addresses"]]
         return cls(path, NETWORKS[data["network"]], data["encrypted"], addresses, int(data["created"]))
 
-    def save(self) -> None:
-        """Write atomically: a crash mid-write never leaves a half-written wallet."""
+    def save(self, *, overwrite: bool = True) -> None:
+        """Publish a complete wallet atomically; creation must never replace an existing path."""
         data = {
             "format": FORMAT,
             "version": VERSION,
@@ -118,11 +119,28 @@ class Wallet:
             "encrypted": self._encrypted,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        if os.name == "posix":
-            os.chmod(temporary, 0o600)
-        os.replace(temporary, self.path)
+        # A unique file avoids collisions between writers. mkstemp creates it with
+        # owner-only permissions on POSIX, before any encrypted secrets are written.
+        descriptor, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                json.dump(data, file, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            if overwrite:
+                os.replace(temporary, self.path)
+            else:
+                try:
+                    # Both operations refuse an existing destination atomically.
+                    if os.name == "nt":
+                        os.rename(temporary, self.path)
+                    else:
+                        os.link(temporary, self.path)
+                except FileExistsError:
+                    raise WalletError(f"{self.path} already exists; refusing to overwrite a wallet") from None
+        finally:
+            temporary.unlink(missing_ok=True)
 
     # --- reading ------------------------------------------------------------
 
