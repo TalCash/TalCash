@@ -53,6 +53,9 @@ Wallet key handling (not consensus, but every TalCash wallet does it this way):
 - Passphrase: standard **BIP39**, 24 English words from 256 bits of cryptographically secure randomness.
 - Seed: BIP39 PBKDF2-HMAC-SHA512 (2048 rounds, salt `"mnemonic" + optional extra passphrase`).
 - Keys: **SLIP-0010** Ed25519 derivation, path `m/44'/84184'/account'/index'`.
+- Wallet file: the secret is encrypted with XSalsa20-Poly1305 under a key derived from the password
+  with Argon2id. A wallet file asking for Argon2id settings outside 1–4 passes and 8 KiB–1 GiB of
+  memory is refused before any work is done, so a doctored file can't make opening it take forever.
 
 ## 4. Transactions
 
@@ -284,6 +287,9 @@ mainnet, 60 on devnet).
   mainnet settings (a year of mostly empty blocks in about 10 minutes), against about 10 ms per
   block one at a time. A segment that would unpack to more than 64 full blocks is refused before
   it is unpacked any further, so a small malicious file can't expand to fill a node's memory.
+- Readers accept only the exact layout writers produce, and check the segment table before
+  unpacking anything: segments in order with no gaps, overlaps or extra bytes, exactly one segment
+  per 64 blocks, no more blocks than a chunk holds, and inside a segment every block 1 byte to 1 MB.
 - Nodes serve sealed chunk files at `GET /v1/chunks/{index}`. `tc read FILE` prints any block or
   chunk file as JSON after checking it.
 
@@ -361,10 +367,14 @@ told otherwise. Interactive documentation is served at `/docs`.
   this document (`insufficient-funds`, `nonce-gap`, `bad-signature`, ...) plus `bad-hex`,
   `bad-encoding`, `bad-address`, `unknown-block`, `unknown-transaction`, `too-large`,
   `rate-limited` (429), `local-only` (403).
+- Request bodies are limited to 2,001,024 bytes (a full-size block as hex plus the JSON around it),
+  counted as the bytes arrive, so a body can't dodge the limit by not declaring its size
+  (413 `too-large`).
 - **Public mode**: a node listening beyond this computer (`--host 0.0.0.0`, needed to accept peers
   from other machines) limits every client that isn't this computer or an address given with
   `--trust`: 20 requests a second (bursts of 100), no mining endpoints, lists of at most 100 items,
   at most 4 WebSocket subscriptions per address and 100 topics each, 2,000 open connections in all.
+  A WebSocket counts toward these limits from the start of its handshake.
   Behind a reverse proxy every client would look local, so a public node shouldn't sit behind one.
 
 | Endpoint | |
@@ -415,7 +425,9 @@ types are ignored, so later versions can add messages.
   1. **Whole days first**: if the peer has sealed chunks the node doesn't, it downloads them from the
      peer's API (`GET /v1/chunks/{index}`, same port) one by one. Each is checked in a background
      thread (file integrity, links, every proof of work) and then applied in one database
-     transaction with every rule checked (section 12).
+     transaction with every rule checked (section 12). Downloads refuse HTTP compression, and a
+     chunk file larger than 32 MB, as downloaded or once unpacked, isn't imported whole: those
+     blocks come one by one instead, so memory stays bounded however full the blocks are.
   2. **Then headers first**: headers after its locator, each checked before any block is fetched:
      links, height, version, timestamp (median rule and future drift), the exact ASERT target, and
      proof of work (on all cores). Only if the checked headers add up to more total work than the
@@ -431,7 +443,15 @@ types are ignored, so later versions can add messages.
   flood only slows the flooder down. Requested blocks are read from disk one at a time as they're
   sent. At most 4 inbound connections per IP address (connections from the same computer don't
   count), 32 inbound in all, and 5,000 queued messages per peer (a peer that can't keep up is
-  disconnected).
+  disconnected). An inbound connection takes its slot from the start of its handshake.
+- **Addresses**: a node address is checked where it points, not just how it's written: a name is
+  looked up once, every address it resolves to is checked, and the node connects to exactly that
+  checked address (the name can't give a different answer in between); redirects are never
+  followed. Addresses on the node's own computer or a private network (127.0.0.1, 10.x, 192.168.x,
+  172.16–31.x, link-local) are only used if the operator configured them
+  (`--peer`) or a peer on that same computer or network named them, and they're never passed on to
+  peers elsewhere. So a stranger can't make a node connect to services on its own machine or
+  network.
 - **Misbehaviour**: anything an honest node never does gets the peer disconnected and **banned for
   an hour**, by node id and by IP address (a node on the same computer only by node id): malformed
   messages, invalid blocks or headers, headers with fake proof of work, damaged or invalid chunk

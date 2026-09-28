@@ -1,5 +1,7 @@
 # TalCash
 
+[![tests](https://github.com/TalCash/TalCash/actions/workflows/tests.yml/badge.svg)](https://github.com/TalCash/TalCash/actions/workflows/tests.yml)
+
 A small proof-of-work cryptocurrency written in Python: node, miner and wallet in one project,
 all sharing a single implementation of the rules. Website: [talcash.com](https://talcash.com)
 
@@ -143,6 +145,8 @@ access, e.g. a separate mining computer on your network.
 - Every peer has a message budget; a flooding peer is read more slowly instead of served faster.
 - A peer that sends anything an honest node never would (invalid blocks or headers, forged
   payments, damaged day files, garbage) is disconnected and banned for an hour.
+- Node addresses are checked where they really point, and large day files sync block by block,
+  so a stranger can't make a node reach into its own network or fill its memory.
 - Everything that reads outside data is fuzz-tested (`tests/test_fuzz.py`; run it longer with
   `TC_FUZZ_ROUNDS=100`).
 
@@ -154,6 +158,9 @@ Requires Python 3.11+.
 pip install -e ".[dev]"
 python -m pytest
 ```
+
+Every push and pull request runs the whole test suite automatically (GitHub Actions: Linux with
+Python 3.11–3.14 and Windows, always with the newest library versions).
 
 ## License
 
