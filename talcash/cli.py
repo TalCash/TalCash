@@ -4,6 +4,7 @@
     tc wallet restore                rebuild a wallet from its 24 words
     tc wallet addresses              list your addresses
     tc wallet new-address            add another address
+    tc wallet scan                   find addresses you used before (asks the node)
     tc wallet show-passphrase        show your 24 words again
     tc wallet balance                balances (asks the node)
     tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...]    send coins (one or many receivers)
@@ -13,8 +14,10 @@
     tc read FILE [--blocks]          show a block file or chunk file as JSON (and check it)
 
 Global options: --network mainnet|testnet|devnet|regtest, --datadir DIR.
-Wallet commands that need a node use --node URL (default: this computer).
+Wallet commands that need a node use --node URL (default: the node on this computer, else the
+network's public node). A node with no --peer finds the network through its public seed nodes.
 Try it locally: `tc --network devnet node --mine` (one block per second).
+Join the public testnet: `tc --network testnet wallet create`, then `tc --network testnet wallet balance`.
 """
 
 import argparse
@@ -39,11 +42,15 @@ from .node.reindex import reindex
 from .node.server import run_node
 from .node.views import block_contents_view
 from .paths import network_dir
+from .public_nodes import PUBLIC_API, SEEDS
 from .wallet.client import NodeClient, NodeError
 from .wallet.keystore import WrongPassword
-from .wallet.wallet import Wallet, WalletError
+from .wallet.wallet import GAP_LIMIT, Wallet, WalletError
 
 MIN_PASSWORD_LENGTH = 8
+# A node's suggested fee above this (base units per byte, 1,000 times the usual minimum) is refused
+# unless you choose the fee yourself with --fee: a wrong or dishonest node can't run up your fee.
+MAX_SUGGESTED_FEE_PER_BYTE = 1000
 
 
 class CommandError(Exception):
@@ -65,12 +72,43 @@ def _load(args: argparse.Namespace, params: NetworkParams) -> Wallet:
     return wallet
 
 
-def _client(args: argparse.Namespace, params: NetworkParams) -> tuple[NodeClient, dict]:
-    client = NodeClient(args.node or f"http://127.0.0.1:{params.default_port}")
+def _local_url(params: NetworkParams) -> str:
+    return f"http://127.0.0.1:{params.default_port}"
+
+
+def _connect(url: str, params: NetworkParams) -> tuple[NodeClient, dict]:
+    client = NodeClient(url)
     status = client.status()
-    if status["network"] != params.name:
-        raise CommandError(f"the node at {client.url} runs {status['network']}, not {params.name}")
+    if status.get("network") != params.name:
+        raise CommandError(f"the node at {client.url} runs {_shown(status.get('network'))}, not {params.name}")
     return client, status
+
+
+def _client(args: argparse.Namespace, params: NetworkParams) -> tuple[NodeClient, dict]:
+    """The node given with --node; else the one on this computer; else the network's public node."""
+    if args.node:
+        return _connect(args.node, params)
+    public = PUBLIC_API.get(params.name)
+    try:
+        return _connect(_local_url(params), params)
+    except NodeError as error:
+        if error.code != "unreachable" or public is None:
+            raise
+    try:
+        client, status = _connect(public, params)
+    except NodeError as error:
+        if error.code != "unreachable":
+            raise
+        raise NodeError("unreachable", f"no node on this computer, and the public {params.name} node "
+                                       f"{public} didn't answer") from None
+    print(f"(using the public {params.name} node {public}; it can see which addresses you ask about)",
+          file=sys.stderr)
+    return client, status
+
+
+def _shown(value: object) -> str:
+    """Text from a node, safe to print: a node elsewhere could send terminal control codes."""
+    return "".join(character for character in str(value) if character.isprintable())
 
 
 def _ask_new_password() -> str:
@@ -129,7 +167,28 @@ def cmd_restore(args: argparse.Namespace, params: NetworkParams) -> int:
     password = _ask_new_password()
     wallet = Wallet.restore(path, params, phrase, password)
     print(f"Wallet restored. Address: {wallet.addresses[0].address}")
-    print("If you used more addresses before, run `tc wallet new-address` until they appear.")
+    try:
+        client, _ = _client(args, params)
+        _scan(wallet, password, client, GAP_LIMIT)
+    except (NodeError, CommandError) as error:
+        print(f"Couldn't look for your other addresses ({error}).")
+        print("Run `tc wallet scan` when a node is running.")
+    return 0
+
+
+def _scan(wallet: Wallet, password: str, client: NodeClient, gap: int) -> None:
+    print(f"Looking for addresses you used before (until {gap} unused in a row)...")
+    added = wallet.discover(password, lambda address: bool(client.history(address, 1)), gap=gap)
+    for entry in added:
+        print(f"#{entry.index}  {entry.address}")
+    print(f"Found {len(added)} more address{'es' if len(added) != 1 else ''}." if added
+          else "No other used addresses found.")
+
+
+def cmd_scan(args: argparse.Namespace, params: NetworkParams) -> int:
+    wallet = _load(args, params)
+    client, _ = _client(args, params)
+    _scan(wallet, getpass.getpass("Wallet password: "), client, args.gap)
     return 0
 
 
@@ -170,7 +229,7 @@ def cmd_balance(args: argparse.Namespace, params: NetworkParams) -> int:
         print(f"Waiting to be mined: +{format_amount(totals['pending_in'])} in, "
               f"-{format_amount(totals['pending_out'])} out")
     if totals["immature"]:
-        print(f"Mining rewards unlocking over the next {status['coinbase_maturity']} blocks: "
+        print(f"Mining rewards unlocking over the next {_shown(status['coinbase_maturity'])} blocks: "
               f"{format_amount(totals['immature'])} TC")
     return 0
 
@@ -209,7 +268,14 @@ def cmd_send(args: argparse.Namespace, params: NetworkParams) -> int:
     info = client.address(sender.address)
     outputs = tuple(Output(payload, units) for _, payload, units in payments)
     size = Transfer(params.network_id, bytes(32), 0, 0, outputs, memo).size  # values don't change the size
-    fee = parse_amount(args.fee) if args.fee else parse_amount(status["min_fee_per_byte"]) * size
+    if args.fee:
+        fee = parse_amount(args.fee)
+    else:
+        per_byte = parse_amount(status["min_fee_per_byte"])
+        if per_byte > MAX_SUGGESTED_FEE_PER_BYTE:
+            raise CommandError(f"the node asks for an unusually high fee ({format_amount(per_byte)} TC per byte); "
+                               f"choose one yourself with --fee")
+        fee = per_byte * size
     available = parse_amount(info["available"])
     if total + fee > available:
         raise CommandError(f"not enough coins: {format_amount(available)} TC available at #{sender.index}, "
@@ -227,14 +293,15 @@ def cmd_send(args: argparse.Namespace, params: NetworkParams) -> int:
         return 1
     tx = wallet.sign_transfer(getpass.getpass("Wallet password: "), index=sender.index, nonce=info["next_nonce"],
                               fee=fee, outputs=[(text, units) for text, _, units in payments], memo=memo)
-    txid = client.submit(tx)["txid"]
+    txid = tx.txid.hex()
+    client.submit(tx)
     print(f"Sent. Transaction {txid}")
     if args.wait:
         deadline = time.monotonic() + max(60, 20 * status["target_spacing"])
         while time.monotonic() < deadline:
             found = client.transaction(txid)
             if found and found["status"] == "confirmed":
-                print(f"Confirmed in block #{found['height']}.")
+                print(f"Confirmed in block #{_shown(found['height'])}.")
                 return 0
             time.sleep(1)
         print("Not mined yet; check later with `tc wallet history`.")
@@ -254,14 +321,14 @@ def cmd_history(args: argparse.Namespace, params: NetworkParams) -> int:
                 when = "waiting to be mined"
             else:
                 stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item["time"]))
-                when = f"{stamp}  block #{item['height']}"
+                when = f"{stamp}  block #{_shown(item['height'])}"
             if item["kind"] == "mined":
                 other = "block reward"
             elif item["kind"] == "received":
-                other = f"from {item['from']}"
+                other = f"from {_shown(item['from'])}"
             else:
-                other = "to " + ", ".join(o["address"] for o in item["outputs"])
-            print(f"   {_tc(item['amount']):>16} TC  {item['kind']:<8} {other}  ({when})")
+                other = "to " + ", ".join(_shown(o["address"]) for o in item["outputs"])
+            print(f"   {_tc(item['amount']):>16} TC  {_shown(item['kind']):<8} {other}  ({when})")
         print()
     return 0
 
@@ -284,9 +351,10 @@ def cmd_node(args: argparse.Namespace, params: NetworkParams) -> int:
     if args.mine is not None:
         text = _load(args, params).addresses[0].address if args.mine == "wallet" else args.mine
         miner = decode_address(text, params.address_prefix)
+    seeds = [] if args.peer or args.no_seeds else list(SEEDS.get(params.name, ()))
     run_node(params, base, host=args.host, port=args.port, miner=miner, workers=args.threads,
-             blocks=args.blocks, min_fee_per_byte=args.min_fee, peers=args.peer, public_url=args.public_url,
-             trusted=args.trust)
+             blocks=args.blocks, min_fee_per_byte=args.min_fee, peers=args.peer, seeds=seeds,
+             public_url=args.public_url, trusted=args.trust)
     return 0
 
 
@@ -352,7 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     wallet = commands.add_parser("wallet", help="manage your wallet")
     wallet.add_argument("--file", help="wallet file (default: <datadir>/<network>/wallet.json)")
-    wallet.add_argument("--node", help="node API address (default: http://127.0.0.1:<network port>)")
+    wallet.add_argument("--node", help="node API address (default: the node on this computer, else the "
+                                       "network's public node)")
     wallet_commands = wallet.add_subparsers(dest="wallet_command", required=True)
     for name, handler, help_text in [
         ("create", cmd_create, "make a new wallet"),
@@ -374,6 +443,11 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--wait", action="store_true", help="wait until the payment is in a block")
     send.set_defaults(handler=cmd_send)
 
+    scan = wallet_commands.add_parser("scan", help="find addresses you used before (asks the node)")
+    scan.add_argument("--gap", type=int, default=GAP_LIMIT,
+                      help=f"stop after this many unused addresses in a row (default {GAP_LIMIT})")
+    scan.set_defaults(handler=cmd_scan)
+
     history = wallet_commands.add_parser("history", help="recent transactions")
     history.add_argument("--limit", type=int, default=20)
     history.set_defaults(handler=cmd_history)
@@ -387,7 +461,9 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--port", type=int, help="API port (default: the network's port)")
     node.add_argument("--min-fee", type=int, default=1, help="smallest fee this node relays, in base units per byte")
     node.add_argument("--peer", action="append", default=[], metavar="URL",
-                      help="another node to connect to, e.g. ws://127.0.0.1:64188/v1/p2p (repeatable)")
+                      help="another node to connect to, e.g. ws://127.0.0.1:64188/v1/p2p (repeatable; "
+                           "without --peer the node finds the network through its public seed nodes)")
+    node.add_argument("--no-seeds", action="store_true", help="don't connect to the network's public seed nodes")
     node.add_argument("--public-url", metavar="URL", help="how other nodes can reach this one (ws://host:port/v1/p2p)")
     node.add_argument("--trust", action="append", default=[], metavar="IP",
                       help="give this address full API access when listening publicly, e.g. a mining "

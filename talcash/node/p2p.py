@@ -183,6 +183,7 @@ class _Recent:
 class P2PConfig:
     listen_url: str | None = None  # where others can reach us (advertised to peers)
     connect: list[str] = field(default_factory=list)  # nodes to always stay connected to
+    seeds: list[str] = field(default_factory=list)  # public nodes to find the network through (never forgotten)
     target_outbound: int = 8
     max_inbound: int = 32
     peers_file: Path | None = None  # remember working addresses here across restarts
@@ -318,7 +319,7 @@ class PeerManager:
         self.config = config
         self.node_id = os.urandom(16).hex()
         self.peers: set[Peer] = set()
-        self.addresses: OrderedDict[str, None] = OrderedDict((url, None) for url in config.connect)
+        self.addresses: OrderedDict[str, None] = OrderedDict((url, None) for url in config.connect + config.seeds)
         self.private_addresses: set[str] = set(config.connect)  # explicitly configured peers are trusted destinations
         self.self_urls: set[str] = set()
         self.url_node: dict[str, str] = {}  # address -> node id seen there (skip dialing nodes we already have)
@@ -450,7 +451,7 @@ class PeerManager:
                 self.retry_at[url] = time.monotonic() + min(60, 2**min(failures, 6))
                 if failures == 1:
                     self.log(f"can't reach {url} ({type(error).__name__}); will keep trying")
-                if failures >= 10 and url not in self.config.connect:
+                if failures >= 10 and url not in self.config.connect and url not in self.config.seeds:
                     self.addresses.pop(url, None)  # a learned address that never works
                 return
             self.failures.pop(url, None)

@@ -67,13 +67,24 @@ python -m talcash --network devnet wallet history
 ## Join the public testnet
 
 The testnet runs the same rules as mainnet (1-minute blocks); its coins are worthless test coins
-with `tt1…` addresses. A new node needs one address to find the network, after that it
-remembers its peers:
+with `tt1…` addresses. See it live in the block explorer: https://testnet-explorer.talcash.com.
+
+A wallet is all you need. With no node on your computer, wallet commands use the public testnet
+node (it can see which addresses you ask about, but it can't touch your coins: everything is
+signed on your computer):
 
 ```
-python -m talcash --network testnet node --peer ws://testnet.talcash.com:64185/v1/p2p
 python -m talcash --network testnet wallet create
 python -m talcash --network testnet wallet balance
+```
+
+To run your own node (and mine, if you like), start it; it finds the network through the
+public seed node `testnet.talcash.com` and remembers its peers from then on. Wallet commands
+then use your node:
+
+```
+python -m talcash --network testnet node
+python -m talcash --network testnet node --mine      # mining pays your wallet's first address
 ```
 
 To let other nodes connect to yours, open port 64185 and start the node with
@@ -108,15 +119,18 @@ Copy the `blocks` folder to another machine and `--reindex` there gives it the w
 
 A node that joins late downloads the sealed day files from its peers and imports a whole day at
 a time, then fetches only the newest blocks one by one. Nodes remember the peers they reached
-(`peers.json`), so after a restart no `--peer` is needed.
+(`peers.json`), so after a restart no `--peer` is needed. A node started without `--peer` also
+connects to its network's public seed nodes (testnet only, until mainnet launches); `--no-seeds`
+turns that off, and giving `--peer` replaces them.
 
 ## Wallet
 
 ```
 tc wallet create             new wallet; shows your 24 words once
-tc wallet restore            from your 24 words
+tc wallet restore            from your 24 words (then finds the addresses you used)
 tc wallet addresses          your addresses
 tc wallet new-address        add another address
+tc wallet scan [--gap N]     find addresses you used before
 tc wallet show-passphrase    your 24 words again
 tc wallet balance            available, incoming, outgoing, unlocking
 tc wallet send ADDRESS AMOUNT [ADDRESS AMOUNT ...] [--fee X] [--from N] [--memo TEXT] [--wait] [--yes]
@@ -125,8 +139,13 @@ tc wallet history
 
 `tc` is `python -m talcash` until you `pip install -e .`. Put `--network testnet|devnet`
 before `wallet` for other networks. Wallets live in `~/.talcash/<network>/wallet.json` (change
-with `--datadir` or `TALCASH_HOME`). Commands that need a node talk to the one on this computer;
-use `wallet --node http://host:port ...` for another.
+with `--datadir` or `TALCASH_HOME`). Commands that need a node talk to the one on this computer,
+else to the network's public node (testnet); use `wallet --node http://host:port ...` for another.
+
+All your addresses come from your 24 words, in order (#0, #1, ...). After a restore the wallet
+asks the node which of them were used and adds them, stopping after 20 unused ones in a row (the
+usual rule, called the gap limit). If you made more than 20 addresses you never used and then
+used a later one, run `tc wallet scan --gap 100`.
 
 ## Node API
 

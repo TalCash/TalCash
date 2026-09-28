@@ -9,7 +9,7 @@ from talcash.crypto import mnemonic
 from talcash.crypto.address import decode_address
 from talcash.wallet import keystore
 from talcash.wallet.keystore import INSECURE_FAST, WrongPassword
-from talcash.wallet.wallet import Wallet, WalletError
+from talcash.wallet.wallet import Wallet, WalletError, _derive_address
 
 PASSWORD = "correct horse battery"
 TEST_PHRASE = " ".join(["abandon"] * 11 + ["about"])
@@ -229,3 +229,49 @@ def test_wallet_creation_fails_safely_when_publication_fails(tmp_path, monkeypat
     with pytest.raises(OSError, match="unsupported"):
         make(tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+def addresses_of(phrase: str, count: int) -> list[str]:
+    """The first `count` addresses a passphrase gives, from a separate copy of the wallet."""
+    return [_derive_address(mnemonic.to_seed(phrase, ""), index, REGTEST) for index in range(count)]
+
+
+def test_discover_finds_used_addresses_up_to_the_gap(tmp_path):
+    wallet, phrase = make(tmp_path)
+    everything = addresses_of(phrase, 60)
+    used = {everything[0], everything[3], everything[7]}
+    checked = []
+
+    def is_used(address):
+        checked.append(address)
+        return address in used
+
+    added = wallet.discover(PASSWORD, is_used)
+    assert [a.index for a in added] == list(range(1, 8))  # up to the last used one, gaps included
+    assert checked == everything[:28]  # #7 was the last used, then 20 unused in a row
+    assert [a.address for a in Wallet.load(tmp_path / "wallet.json").addresses] == everything[:8]
+    assert wallet.new_address(PASSWORD).index == 8
+    assert wallet.discover(PASSWORD, is_used) == []  # nothing new the second time
+
+
+def test_discover_respects_the_gap(tmp_path):
+    wallet, phrase = make(tmp_path)
+    far = addresses_of(phrase, 26)[25]
+    assert wallet.discover(PASSWORD, lambda address: address == far) == []  # 20 unused after #0: stop
+    assert [a.index for a in wallet.discover(PASSWORD, lambda address: address == far, gap=30)] == list(range(1, 26))
+    with pytest.raises(ValueError, match="gap"):
+        wallet.discover(PASSWORD, lambda address: False, gap=0)
+
+
+def test_discover_keeps_addresses_made_by_hand(tmp_path):
+    wallet, _ = make(tmp_path)
+    for _ in range(3):
+        wallet.new_address(PASSWORD)
+    assert wallet.discover(PASSWORD, lambda address: False) == []
+    assert [a.index for a in wallet.addresses] == [0, 1, 2, 3]
+
+
+def test_discover_checks_the_password_first(tmp_path):
+    wallet, _ = make(tmp_path)
+    with pytest.raises(WrongPassword):
+        wallet.discover("wrong password", lambda address: pytest.fail("asked the node without the password"))

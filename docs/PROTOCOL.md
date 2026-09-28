@@ -53,6 +53,9 @@ Wallet key handling (not consensus, but every TalCash wallet does it this way):
 - Passphrase: standard **BIP39**, 24 English words from 256 bits of cryptographically secure randomness.
 - Seed: BIP39 PBKDF2-HMAC-SHA512 (2048 rounds, salt `"mnemonic" + optional extra passphrase`).
 - Keys: **SLIP-0010** Ed25519 derivation, path `m/44'/84184'/account'/index'`.
+- Finding used addresses (after a restore): check addresses in order from index 0 and stop after
+  **20 unused in a row** (the BIP44 gap limit). An address counts as used if the node has any history
+  for it, confirmed or pending. Everything up to the last used address is added to the wallet.
 - Wallet file: the secret is encrypted with XSalsa20-Poly1305 under a key derived from the password
   with Argon2id. A wallet file asking for Argon2id settings outside 1–4 passes and 8 KiB–1 GiB of
   memory is refused before any work is done, so a doctored file can't make opening it take forever.
@@ -462,3 +465,10 @@ types are ignored, so later versions can add messages.
 - Nodes keep up to 8 outbound connections (`--peer` addresses first, then learned ones) and accept
   up to 32 inbound. Addresses the node managed to connect to are saved in `peers.json` next to the
   chain, so a restarted node reconnects without `--peer`.
+- **Seed nodes**: a node started without `--peer` also dials its network's public seed nodes
+  (testnet: `ws://testnet.talcash.com:64185/v1/p2p`; mainnet's are added at launch). Seeds are
+  never forgotten after failed dials, but unlike `--peer` addresses they are not allowed to resolve
+  to private addresses. A node whose own public URL is a seed never dials itself. `--no-seeds` turns
+  them off. The wallet likewise falls back to the network's public node API
+  (`http://testnet.talcash.com:64185`) when none answers on this computer, and refuses a suggested
+  fee above 1,000 base units per byte unless the user sets `--fee`.

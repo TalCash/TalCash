@@ -138,3 +138,98 @@ def test_wallet_explains_when_no_node_is_running(tmp_path, capsys):
             "balance"]
     assert main(args) == 1
     assert "is `tc node` running?" in capsys.readouterr().err
+
+
+def test_wallet_falls_back_to_the_public_node(tmp_path, node_url, monkeypatch, capsys):
+    Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    args = ["--network", "regtest", "--datadir", str(tmp_path), "wallet", "balance"]
+    monkeypatch.setattr("talcash.cli._local_url", lambda params: f"http://127.0.0.1:{free_port()}")
+
+    monkeypatch.setattr("talcash.cli.PUBLIC_API", {"regtest": node_url})
+    assert main(args) == 0
+    captured = capsys.readouterr()
+    assert f"using the public regtest node {node_url}" in captured.err
+    assert "Available now: 0 TC" in captured.out
+
+    monkeypatch.setattr("talcash.cli.PUBLIC_API", {"regtest": f"http://127.0.0.1:{free_port()}"})
+    assert main(args) == 1
+    assert "no node on this computer, and the public regtest node" in capsys.readouterr().err
+
+    monkeypatch.setattr("talcash.cli.PUBLIC_API", {})  # a network without one (mainnet, until launch)
+    assert main(args) == 1
+    assert "is `tc node` running?" in capsys.readouterr().err
+
+
+def test_a_node_on_this_computer_comes_first(tmp_path, node_url, monkeypatch, capsys):
+    Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    monkeypatch.setattr("talcash.cli._local_url", lambda params: node_url)
+    monkeypatch.setattr("talcash.cli.PUBLIC_API", {"regtest": "http://public.invalid:1"})
+    assert main(["--network", "regtest", "--datadir", str(tmp_path), "wallet", "balance"]) == 0
+    assert "public" not in capsys.readouterr().err
+
+
+def test_scan_finds_addresses_used_before(tmp_path, node_url, monkeypatch, capsys):
+    wallet, phrase = Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    other = Wallet.restore(tmp_path / "copy.json", REGTEST, phrase, PASSWORD, strength=INSECURE_FAST)
+    for _ in range(4):
+        fourth = other.new_address(PASSWORD)
+    mine_to(node_url, fourth.address, 1)  # the copy's address #4 got a block reward
+
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": PASSWORD)
+    base = ["--network", "regtest", "--datadir", str(tmp_path), "wallet", "--node", node_url]
+    assert main(base + ["scan"]) == 0
+    out = capsys.readouterr().out
+    assert "Found 4 more addresses." in out and fourth.address in out
+    assert [a.address for a in Wallet.load(wallet.path).addresses] == [a.address for a in other.addresses]
+    assert main(base + ["scan"]) == 0
+    assert "No other used addresses found." in capsys.readouterr().out
+    assert main(base + ["scan", "--gap", "0"]) == 1
+
+
+def test_restore_looks_for_used_addresses(tmp_path, node_url, monkeypatch, capsys):
+    """The real command, with the real (slow) password stretching."""
+    _, phrase = Wallet.create(tmp_path / "original.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+    original = Wallet.load(tmp_path / "original.json")
+    second = original.new_address(PASSWORD)
+    mine_to(node_url, second.address, 1)
+
+    answers = iter([phrase, PASSWORD, PASSWORD])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+    base = ["--network", "regtest", "--datadir", str(tmp_path), "wallet"]
+    assert main(base + ["--node", node_url, "restore"]) == 0
+    assert "Found 1 more address." in capsys.readouterr().out
+    assert [a.address for a in Wallet.load(tmp_path / "regtest" / "wallet.json").addresses] == \
+        [a.address for a in original.addresses]
+
+    # With no node to ask, the wallet is still restored and the user is told how to look later.
+    answers = iter([phrase, PASSWORD, PASSWORD])
+    monkeypatch.setattr("talcash.cli._local_url", lambda params: f"http://127.0.0.1:{free_port()}")
+    monkeypatch.setattr("talcash.cli.PUBLIC_API", {})
+    assert main(base + ["--file", str(tmp_path / "again.json"), "restore"]) == 0
+    assert "Run `tc wallet scan` when a node is running." in capsys.readouterr().out
+    assert len(Wallet.load(tmp_path / "again.json").addresses) == 1
+
+
+def test_send_refuses_a_node_asking_for_a_huge_fee(tmp_path, monkeypatch, capsys):
+    wallet, _ = Wallet.create(tmp_path / "regtest" / "wallet.json", REGTEST, PASSWORD, strength=INSECURE_FAST)
+
+    sent = []
+
+    class GreedyNode:
+        url = "http://greedy.invalid"
+
+        def address(self, address):
+            return {"available": "1000.000000", "next_nonce": 0}
+
+        def submit(self, tx):
+            sent.append(tx)
+
+    status = {"network": "regtest", "min_fee_per_byte": "0.002000", "target_spacing": 1}
+    monkeypatch.setattr("talcash.cli._client", lambda args, params: (GreedyNode(), status))
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": PASSWORD)
+    send = ["--network", "regtest", "--datadir", str(tmp_path), "wallet", "send", wallet.addresses[0].address, "1",
+            "--yes"]
+    assert main(send) == 1
+    assert "unusually high fee" in capsys.readouterr().err and not sent
+    assert main(send + ["--fee", "0.001"]) == 0  # choosing the fee yourself is always possible
+    assert [tx.fee for tx in sent] == [1000]

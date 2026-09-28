@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from .keystore import MODERATE, KdfStrength
 
 FORMAT = "talcash-wallet"
 VERSION = 1
+GAP_LIMIT = 20  # finding used addresses stops after this many unused ones in a row
 
 
 class WalletError(Exception):
@@ -175,6 +177,30 @@ class Wallet:
         self._addresses.append(entry)
         self.save()
         return entry
+
+    def discover(self, password: str, is_used: Callable[[str], bool], *, gap: int = GAP_LIMIT) -> list[WalletAddress]:
+        """Find the addresses used before (e.g. after a restore) and add them. Returns the added ones.
+
+        Checks addresses in order from #0 and stops after `gap` unused ones in a row, the usual
+        rule for wallets built from one passphrase (BIP44's "gap limit"). Every address up to the
+        last used one is added, so new_address() carries on after it.
+        """
+        if gap < 1:
+            raise ValueError("the gap must be at least 1")
+        seed = self._verified_seed(password)
+        known = {a.index: a.address for a in self._addresses}
+        found: dict[int, str] = {}
+        last_used, index = -1, 0
+        while index - last_used <= gap:
+            found[index] = known.get(index) or _derive_address(seed, index, self.params)
+            if is_used(found[index]):
+                last_used = index
+            index += 1
+        added = [WalletAddress(i, found[i]) for i in range(last_used + 1) if i not in known]
+        if added:
+            self._addresses = sorted(self._addresses + added, key=lambda a: a.index)
+            self.save()
+        return added
 
     def private_key(self, password: str, index: int) -> bytes:
         if index not in {a.index for a in self._addresses}:

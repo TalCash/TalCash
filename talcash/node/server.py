@@ -84,21 +84,23 @@ def run_node(
     blocks: int | None = None,
     min_fee_per_byte: int = 1,
     peers: list[str] | None = None,
+    seeds: list[str] | None = None,
     public_url: str | None = None,
     trusted: list[str] | None = None,
     log: Callable[[str], None] = print_now,
 ) -> None:
     """Run until Ctrl+C (or until `blocks` blocks are mined).
 
-    `peers` are nodes to stay connected to (ws://host:port/v1/p2p). `public_url` is how other
-    nodes can reach this one; by default it's derived from host and port when those are specific.
+    `peers` are nodes to stay connected to (ws://host:port/v1/p2p); `seeds` are public nodes to
+    find the network through. `public_url` is how other nodes can reach this one; by default it's
+    derived from host and port when those are specific.
     Listening anywhere but this computer (e.g. --host 0.0.0.0) puts the API in public mode (see
     api.py); `trusted` addresses still get full access.
     """
     port = params.default_port if port is None else port
     if public_url is None and host not in ("0.0.0.0", "::") and port != 0:
         public_url = f"ws://{host}:{port}/v1/p2p"
-    p2p = P2PConfig(listen_url=public_url, connect=list(peers or []),
+    p2p = P2PConfig(listen_url=public_url, connect=list(peers or []), seeds=list(seeds or []),
                     peers_file=network_dir(params.name, base) / "peers.json")
     public = not is_loopback(host)
     policy = ApiPolicy(public=public, trusted=frozenset(trusted or []))
@@ -113,6 +115,9 @@ def run_node(
         log(f"API on http://{host}:{port}/v1/status (interactive docs: http://{host}:{port}/docs)")
         if public_url:
             log(f"other nodes can connect to {public_url}")
+        for seed in seeds or []:
+            if seed != public_url:
+                log(f"finding the network through {seed}")
         if public:
             log("public mode: other computers get a rate-limited API without mining"
                 + (f" (full access: {', '.join(sorted(policy.trusted))})" if policy.trusted else ""))
