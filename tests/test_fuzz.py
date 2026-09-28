@@ -331,7 +331,7 @@ def test_the_api_never_fails_with_a_server_error():
         for _ in range(600 * ROUNDS):
             api = rng.choice([stranger, local])
             path = rng.choice(paths).replace("{}", quote(piece(), safe=""))  # the node sees it decoded
-            params = {rng.choice(["limit", "format", "address", "x"]): piece() for _ in range(rng.randrange(3))}
+            params = {rng.choice(["limit", "format", "address", "before", "x"]): piece() for _ in range(rng.randrange(3))}
             response = api.get(path, params=params)
             assert response.status_code < 500, (path, params, response.text)
 

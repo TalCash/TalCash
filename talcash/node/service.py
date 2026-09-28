@@ -193,10 +193,11 @@ class NodeService:
             immature=immature,
         )
 
-    def history(self, address: bytes, limit: int = 50) -> list[HistoryItem]:
-        """Waiting transfers first, then confirmed transactions, newest first."""
-        items = [HistoryItem(e.tx, None, None) for e in self.mempool.involving(address)][:limit]
-        for height, position, _ in self.store.address_history(address, limit - len(items)):
+    def history(self, address: bytes, limit: int = 50, before: tuple[int, int] | None = None) -> list[HistoryItem]:
+        """Waiting transfers first, then confirmed transactions, newest first. With `before`
+        (height, position of the last item already seen), the next page: older confirmed ones only."""
+        items = [] if before else [HistoryItem(e.tx, None, None) for e in self.mempool.involving(address)][:limit]
+        for height, position, _ in self.store.address_history(address, limit - len(items), before):
             block = self.chain.main_block(height)
             location = TxLocation(block.block_id, height, position)
             items.append(HistoryItem(block.transactions[position], location, block.header.timestamp))

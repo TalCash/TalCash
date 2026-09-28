@@ -222,3 +222,23 @@ def test_strangers_may_open_only_a_few_live_connections():
         with api.websocket_connect("/v1/ws") as again:  # closed ones don't count any more
             again.send_json({"subscribe": ["blocks"]})
             assert again.receive_json()["event"] == "subscribed"
+
+
+def test_history_pages_with_a_cursor(api):
+    mine_blocks(api, ALICE_TEXT, 7)  # Alice mined blocks 1-7; 1-4 have unlocked (maturity 3)
+    waiting = make_transfer(PARAMS, ALICE, 0, [(BOB.address, 1000)], fee=500)
+    assert api.post("/v1/tx", json={"hex": waiting.serialize().hex()}).status_code == 200
+
+    def page(**params):
+        return api.get(f"/v1/address/{ALICE_TEXT}/history", params={"limit": 3, **params}).json()
+
+    first = page()
+    assert [item.get("height") for item in first] == [None, 7, 6]  # the waiting payment comes first
+    cursor = f"{first[-1]['height']}:{first[-1]['position']}"
+    assert [item["height"] for item in page(before=cursor)] == [5, 4, 3]
+    assert [item["height"] for item in page(before="3:0")] == [2, 1]
+    assert page(before="1:0") == []
+    for bad in ("x", "5", "5:", ":0", "-1:0", "1:-1", "٣:0", "9" * 40 + ":0"):
+        response = api.get(f"/v1/address/{ALICE_TEXT}/history", params={"before": bad})
+        assert response.status_code in (400, 422) and response.json().get("error", "bad-cursor") == "bad-cursor", bad
+    assert api.get("/v1/status").json()["chunk_size"] == PARAMS.chunk_size

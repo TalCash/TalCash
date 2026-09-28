@@ -333,12 +333,21 @@ class Store:
             "SELECT height FROM address_index WHERE address = ? AND position = 0 AND height > ?", (address, above)
         )]
 
-    def address_history(self, address: bytes, limit: int = 100) -> list[tuple[int, int, bytes]]:
-        """(height, position, txid), newest first."""
+    def address_history(
+        self, address: bytes, limit: int = 100, before: tuple[int, int] | None = None
+    ) -> list[tuple[int, int, bytes]]:
+        """(height, position, txid), newest first; with `before` = (height, position), only older ones."""
+        if before is None:
+            return self._db.execute(
+                "SELECT height, position, txid FROM address_index WHERE address = ? "
+                "ORDER BY height DESC, position DESC LIMIT ?",
+                (address, limit),
+            ).fetchall()
+        height, position = before
         return self._db.execute(
             "SELECT height, position, txid FROM address_index WHERE address = ? "
-            "ORDER BY height DESC, position DESC LIMIT ?",
-            (address, limit),
+            "AND (height < ? OR (height = ? AND position < ?)) ORDER BY height DESC, position DESC LIMIT ?",
+            (address, height, height, position, limit),
         ).fetchall()
 
 

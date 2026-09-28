@@ -379,13 +379,13 @@ told otherwise. Interactive documentation is served at `/docs`.
 
 | Endpoint | |
 |---|---|
-| `GET /v1/status` | network, genesis, height, tip, difficulty, reward, minimum fee, mempool size |
+| `GET /v1/status` | network, genesis, height, tip, difficulty, reward, minimum fee, mempool size, `finalized_height`, `sealed_chunks`, `chunk_size` |
 | `GET /v1/blocks/{height or id}` | a block with its transactions; `?format=hex` for raw bytes |
 | `GET /v1/tx/{txid}` | a transaction, `pending` or `confirmed` (height, confirmations) |
 | `POST /v1/tx` | `{"hex": ...}` submit a signed transfer |
 | `GET /v1/mempool` | waiting transfers |
 | `GET /v1/address/{address}` | `balance`, `available` (balance minus waiting spends), `pending_in`, `pending_out`, `immature` (unlocking rewards), `nonce`, `next_nonce` |
-| `GET /v1/address/{address}/history` | transactions touching the address, newest first, with `kind` and signed `amount` |
+| `GET /v1/address/{address}/history` | transactions touching the address, newest first, with `kind` and signed `amount`; `?limit=` (up to 500) and, for the next page, `?before=HEIGHT:POSITION` of the last item |
 | `GET /v1/mining/template?address=` | a block ready to mine (nonce 0), its target and Argon2id settings |
 | `POST /v1/mining/submit` | `{"hex": ...}` a mined block |
 | `WS /v1/ws` | live events |

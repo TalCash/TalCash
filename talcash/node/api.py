@@ -160,7 +160,7 @@ def create_app(
         if item.location is None:
             return {**view, "status": "pending"}
         return {**view, "status": "confirmed", "height": item.location.height,
-                "block": item.location.block_id.hex(), "time": item.time,
+                "position": item.location.position, "block": item.location.block_id.hex(), "time": item.time,
                 "confirmations": service.confirmations(item.location.height)}
 
     @app.get("/v1/status")
@@ -175,6 +175,7 @@ def create_app(
             "tip": block_summary(service, tip),
             "finalized_height": service.chain.finalized_height(),
             "sealed_chunks": service.store.sealed_chunks(),
+            "chunk_size": params.chunk_size,
             "target_spacing": params.target_spacing,
             "block_reward": amount(params.block_reward),
             "coinbase_maturity": params.coinbase_maturity,
@@ -268,11 +269,20 @@ def create_app(
 
     @app.get("/v1/address/{address}/history")
     async def get_history(address: str, request: Request,
-                          limit: Annotated[int, Query(ge=1, le=500)] = 50) -> list[dict]:
+                          limit: Annotated[int, Query(ge=1, le=500)] = 50,
+                          before: Annotated[str | None, Query(max_length=30)] = None) -> list[dict]:
+        """Newest first. For the next page pass `before=HEIGHT:POSITION` of the last item received."""
         service = service_of(request)
         payload = parse_address(service, address)
+        cursor = None
+        if before is not None:
+            height, _, position = before.partition(":")
+            if not (height.isascii() and height.isdigit() and position.isascii() and position.isdigit()
+                    and len(height) <= 18 and len(position) <= 6):
+                raise ApiError(400, "bad-cursor", "use before=HEIGHT:POSITION from the last item")
+            cursor = (int(height), int(position))
         result = []
-        for item in service.history(payload, list_limit(request, limit)):
+        for item in service.history(payload, list_limit(request, limit), cursor):
             tx = item.tx
             if isinstance(tx, Coinbase):
                 kind, delta = "mined", tx.amount
