@@ -140,6 +140,34 @@ def test_interactive_docs_are_served(api):
     assert "/v1/address/{address}" in api.get("/openapi.json").json()["paths"]
 
 
+@pytest.mark.parametrize("headers", [{}, {"content-length": "1"}])
+def test_body_limit_counts_streamed_bytes(api, headers):
+    def chunks():
+        yield b'{"hex":"'
+        for _ in range(3):
+            yield b"0" * 1_000_000
+        yield b'"}'
+
+    response = api.post("/v1/tx", content=chunks(), headers=headers)
+    assert response.status_code == 413
+    assert response.json()["error"] == "too-large"
+    assert api.get("/v1/status").status_code == 200
+
+
+def test_body_limit_leaves_room_for_a_full_block_envelope(api):
+    # A block at the consensus size limit occupies twice as many hex characters.
+    response = api.post("/v1/mining/submit", json={"hex": "00" * PARAMS.max_block_size})
+    assert response.status_code == 400  # reaches block decoding instead of HTTP 413
+    assert response.json()["error"] == "bad-encoding"
+
+
+def test_body_limit_accepts_small_chunked_json(api):
+    response = api.post("/v1/tx", content=iter([b'{"hex":', b'"00"}']),
+                        headers={"content-type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "bad-encoding"
+
+
 # --- public mode: what strangers get ---------------------------------------------------------
 # TestClient requests come from "testclient", which isn't this computer: a stranger.
 

@@ -82,13 +82,13 @@ def all_meet_target(headers: list[BlockHeader], pow_params: PowParams) -> bool:
         return all(pool.map(lambda h: meets_target(h, pow_params), headers))
 
 
-def check_chunk_file(data: bytes, params: NetworkParams) -> CheckedChunk:
+def check_chunk_file(data: bytes, params: NetworkParams, *, max_decoded_bytes: int | None = None) -> CheckedChunk:
     """File integrity, shape and every block's proof of work (on all cores).
 
     Touches no database, so a node can run it in a background thread while it keeps serving.
     Raises ChunkError or ValidationError.
     """
-    chunk = decode_chunk(data)
+    chunk = decode_chunk(data, max_blocks=params.chunk_size, max_decoded_bytes=max_decoded_bytes)
     if chunk.network_id != params.network_id:
         raise ValidationError("wrong-network", "chunk is from another network")
     if chunk.first_height != chunk.index * params.chunk_size or len(chunk.blocks) != params.chunk_size:
@@ -308,6 +308,12 @@ class ChainManager:
             # Nothing to check it against yet, but it must at least carry the work it claims.
             if block.header.target > self.params.pow_limit or not meets_target(block.header, self.params.pow):
                 return self._invalid(block_id, ValidationError("bad-pow"))
+            # The header's id must not let an altered body poison the orphan cache.
+            try:
+                check_not_in_future(block.header, int(self.clock()), self.params)
+                check_block(block, self.params)
+            except ValidationError as error:
+                return self._invalid(block_id, error)
             self._hold_orphan(block)
             return SubmitResult(Outcome.ORPHAN, block_id)
         if parent.status == STATUS_INVALID:

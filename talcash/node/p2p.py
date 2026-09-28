@@ -68,16 +68,16 @@ from urllib.parse import urlsplit
 
 import httpx
 from starlette.websockets import WebSocket, WebSocketDisconnect
-from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidURI
 
 from .. import __version__
 from ..core.block import Block, block_from_bytes, header_from_bytes
 from ..core.errors import DecodeError, ValidationError
 from ..core.tx import Transfer, transaction_from_bytes
-from .blockfiles import ChunkError
+from .blockfiles import ChunkError, ChunkTooLarge
 from .chain import HeaderTip, Outcome, all_meet_target, check_chunk_file
 from .limits import TokenBucket, is_local, is_loopback
+from .peer_net import connect_peer, parse_peer_url, pinned_http_url
 from .service import NodeService
 from .store import STATUS_INVALID, STATUS_VALID
 
@@ -96,6 +96,7 @@ CHECK_INTERVAL = 2
 SAVE_PEERS_INTERVAL = 30
 BAN_SECONDS = 3600
 MAX_INBOUND_PER_HOST = 4
+MAX_SYNC_CHUNK_BYTES = 32 * 1024 * 1024  # larger chunks sync block by block instead
 MAX_PENDING_HEADERS = 50_000  # checked headers waiting for their blocks, per sync
 
 # Each peer's message budget (see "Limits" above). Messages not listed cost 1.
@@ -121,9 +122,11 @@ class ProtocolError(Exception):
 
 def _http_base(ws_url: str | None) -> str | None:
     """ws://host:port/v1/p2p -> http://host:port (a node's API is on the same port)."""
-    if not ws_url or not ws_url.startswith(("ws://", "wss://")):
+    try:
+        parsed = parse_peer_url(ws_url)
+    except (TypeError, ValueError):
         return None
-    return "http" + ws_url[2:].split("/v1/")[0]
+    return ("https" if parsed.scheme == "wss" else "http") + "://" + parsed.netloc
 
 
 def _url_host(url: str | None) -> str | None:
@@ -138,19 +141,25 @@ def max_chunk_file_bytes(params) -> int:
     return params.chunk_size * (params.max_block_size + 64) + 1_000_000
 
 
-async def download_chunk(http_base: str, index: int, max_bytes: int) -> bytes | None:
+async def download_chunk(http_base: str, index: int, max_bytes: int, *, allow_private: bool = False) -> bytes | None:
     """A peer's sealed chunk file, or None if it doesn't have it. Refuses files over `max_bytes`."""
-    async with httpx.AsyncClient(timeout=60) as client:
-        async with client.stream("GET", f"{http_base}/v1/chunks/{index}") as response:
+    target, headers, extensions = await pinned_http_url(
+        f"{http_base}/v1/chunks/{index}", allow_private=allow_private
+    )
+    headers["Accept-Encoding"] = "identity"  # do not expand an HTTP compression bomb before counting bytes
+    max_bytes = min(max_bytes, MAX_SYNC_CHUNK_BYTES)
+    async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False) as client:
+        async with client.stream("GET", target, headers=headers, extensions=extensions) as response:
             if response.status_code != 200:
                 return None
-            parts, total = [], 0
-            async for part in response.aiter_bytes():
-                total += len(part)
-                if total > max_bytes:
-                    raise ProtocolError("chunk file too large")
-                parts.append(part)
-            return b"".join(parts)
+            if response.headers.get("content-encoding", "identity").lower() != "identity":
+                raise ProtocolError("HTTP compression is not supported for chunk downloads")
+            data = bytearray()
+            async for part in response.aiter_raw(chunk_size=64 * 1024):
+                if len(data) + len(part) > max_bytes:
+                    raise ChunkTooLarge("chunk file exceeds the download byte budget")
+                data.extend(part)
+            return bytes(data)
 
 
 class _Recent:
@@ -273,7 +282,11 @@ def _count(message: dict, key: str) -> int:
 
 
 def _valid_url(url: object) -> bool:
-    return isinstance(url, str) and url.startswith(("ws://", "wss://")) and len(url) <= 200
+    try:
+        parse_peer_url(url)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _meaningful_between(peer_host: str | None, url: str) -> bool:
@@ -306,6 +319,7 @@ class PeerManager:
         self.node_id = os.urandom(16).hex()
         self.peers: set[Peer] = set()
         self.addresses: OrderedDict[str, None] = OrderedDict((url, None) for url in config.connect)
+        self.private_addresses: set[str] = set(config.connect)  # explicitly configured peers are trusted destinations
         self.self_urls: set[str] = set()
         self.url_node: dict[str, str] = {}  # address -> node id seen there (skip dialing nodes we already have)
         self.dialing: set[str] = set()
@@ -338,6 +352,8 @@ class PeerManager:
             if _valid_url(url) and url not in self.self_urls:
                 self.remembered.add(url)
                 self.addresses.setdefault(url, None)
+                if is_local(_url_host(url)):
+                    self.private_addresses.add(url)
 
     def _remember(self, url: str) -> None:
         if url not in self.remembered and url not in self.self_urls:
@@ -406,12 +422,13 @@ class PeerManager:
     async def _dial(self, url: str) -> None:
         try:
             try:
-                connection = await ws_connect(url, max_size=MAX_MESSAGE_BYTES, open_timeout=5,
-                                              ping_interval=20, ping_timeout=20)
+                connection = await connect_peer(url, allow_private=url in self.private_addresses,
+                                                max_size=MAX_MESSAGE_BYTES, open_timeout=5,
+                                                ping_interval=20, ping_timeout=20)
             except (OSError, InvalidHandshake, InvalidURI, TimeoutError, ValueError) as error:
                 failures = self.failures.get(url, 0) + 1
                 self.failures[url] = failures
-                self.retry_at[url] = time.monotonic() + min(60, 2**failures)
+                self.retry_at[url] = time.monotonic() + min(60, 2**min(failures, 6))
                 if failures == 1:
                     self.log(f"can't reach {url} ({type(error).__name__}); will keep trying")
                 if failures >= 10 and url not in self.config.connect:
@@ -451,7 +468,6 @@ class PeerManager:
         if refusal is not None:
             await socket.close(code=refusal)
             return
-        await socket.accept()
         label = f"{client.host}:{client.port}" if client else "inbound"
 
         async def recv_text() -> str:
@@ -462,7 +478,13 @@ class PeerManager:
                 raise ProtocolError("binary message")
             return message["text"]
 
-        await self._serve(Peer(socket.send_text, recv_text, socket.close, outbound=False, label=label, host=host))
+        peer = Peer(socket.send_text, recv_text, socket.close, outbound=False, label=label, host=host)
+        self.peers.add(peer)  # pending handshakes must occupy their slot before accept() yields
+        try:
+            await socket.accept()
+            await self._serve(peer)
+        finally:
+            self.peers.discard(peer)
 
     async def _serve(self, peer: Peer) -> None:
         self.peers.add(peer)
@@ -601,7 +623,7 @@ class PeerManager:
         if peer.outbound:
             self._remember(peer.url)
         elif listen:
-            self._learn(listen)
+            self._learn(listen, allow_private=is_local(peer.host))
         self.log(f"connected to {peer.label} ({'outbound' if peer.outbound else 'inbound'}, height {peer.height})")
 
         peer.send({"type": "get_peers"})
@@ -610,9 +632,11 @@ class PeerManager:
             peer.send({"type": "inv", "txs": txids[start:start + MAX_INV]})
         self._maybe_sync()
 
-    def _learn(self, url: str) -> None:
+    def _learn(self, url: str, *, allow_private: bool = False) -> None:
         if url not in self.addresses and url not in self.self_urls and len(self.addresses) < 1000:
             self.addresses[url] = None
+        if url in self.addresses and allow_private:
+            self.private_addresses.add(url)
 
     # --- messages -------------------------------------------------------------
 
@@ -736,7 +760,7 @@ class PeerManager:
             raise ProtocolError("bad peers list")
         for url in urls:
             if _valid_url(url) and _meaningful_between(peer.host, url):
-                self._learn(url)
+                self._learn(url, allow_private=is_local(peer.host))
 
     # --- catching up ----------------------------------------------------------
 
@@ -791,15 +815,21 @@ class PeerManager:
                     break
                 peer.last_progress = time.monotonic()
                 try:
-                    data = await download_chunk(peer.http_url, index, max_chunk_file_bytes(params))
-                except (httpx.HTTPError, httpx.InvalidURL, ProtocolError) as error:
+                    data = await download_chunk(peer.http_url, index, max_chunk_file_bytes(params),
+                                                allow_private=is_local(peer.host))
+                except (httpx.HTTPError, httpx.InvalidURL, ProtocolError, OSError, ValueError) as error:
                     self.log(f"couldn't download chunk {index} from {peer.label} ({error}); going block by block")
                     break
                 if data is None:
                     break
                 try:
-                    checked = await loop.run_in_executor(None, check_chunk_file, data, params)
+                    checked = await loop.run_in_executor(None, partial(
+                        check_chunk_file, data, params, max_decoded_bytes=MAX_SYNC_CHUNK_BYTES
+                    ))
                     self.service.import_chunk(checked, origin=peer)
+                except ChunkTooLarge:
+                    self.log(f"chunk {index} exceeds the memory budget; going block by block")
+                    break
                 except ValidationError as error:
                     if error.code == "chunk-not-next":
                         break  # our chain differs from theirs here: go block by block

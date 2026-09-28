@@ -5,6 +5,60 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+
+class BodyLimitMiddleware:
+    """Bound actual HTTP body bytes before a JSON parser can buffer them."""
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def reject() -> None:
+            response = JSONResponse(
+                {"error": "too-large", "detail": f"at most {self.max_bytes} bytes"}, status_code=413
+            )
+            await response(scope, receive, send)
+
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"content-length":
+                digits = value.lstrip(b"0") or b"0"
+                maximum = str(self.max_bytes).encode("ascii")
+                if (not value.isdigit() or len(digits) > len(maximum)
+                        or (len(digits) == len(maximum) and digits > maximum)):
+                    await reject()
+                    return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > self.max_bytes:
+                await reject()
+                return
+            body.extend(chunk)
+            if not message.get("more_body", False):
+                break
+
+        delivered = False
+
+        async def replay() -> dict:
+            nonlocal delivered
+            if delivered:
+                return await receive()
+            delivered = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay, send)
+
 
 class TokenBucket:
     """Allows `rate` units per second on average, and bursts of up to `burst` units.

@@ -44,12 +44,12 @@ from ..core.difficulty import difficulty
 from ..core.errors import DecodeError, ValidationError
 from ..core.tx import Coinbase, transaction_from_bytes
 from ..crypto.address import decode_address, is_valid_address
-from .limits import HostBuckets, is_loopback
+from .limits import BodyLimitMiddleware, HostBuckets, is_loopback
 from .p2p import P2PConfig, PeerManager
 from .service import HistoryItem, NodeService
 from .views import amount, block_view, tx_view
 
-MAX_BODY_BYTES = 2_000_000
+MAX_BODY_BYTES = 2_001_024  # a full 1 MB block as hex, plus the JSON envelope
 MAX_TOPICS = 1000
 
 
@@ -117,6 +117,7 @@ def create_app(
 
     app = FastAPI(title="TalCash node", version=__version__, lifespan=lifespan,
                   description="Amounts are strings in TC with 6 decimals. Ids are hex.")
+    app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_BODY_BYTES)
 
     @app.exception_handler(ApiError)
     async def api_error(request: Request, error: ApiError) -> JSONResponse:
@@ -124,9 +125,6 @@ def create_app(
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
-        length = request.headers.get("content-length")
-        if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
-            return JSONResponse({"error": "too-large", "detail": f"at most {MAX_BODY_BYTES} bytes"}, status_code=413)
         host = request.client.host if request.client else None
         trusted = policy.is_trusted(host)
         request.state.trusted = trusted
@@ -330,11 +328,11 @@ def create_app(
                             or websockets.total() >= policy.max_websockets):
             await socket.close(code=1013)  # try again later
             return
-        await socket.accept()
-        subscription = service.events.subscribe()
-        max_topics = MAX_TOPICS if trusted else policy.stranger_topics
+        # Reserve before accept() yields, so simultaneous handshakes count too.
         if not trusted:
             websockets[host] += 1
+        subscription = service.events.subscribe()
+        max_topics = MAX_TOPICS if trusted else policy.stranger_topics
 
         async def read() -> None:
             while True:
@@ -361,10 +359,14 @@ def create_app(
             while not subscription.overflowed:
                 await socket.send_json(await subscription.queue.get())
 
-        tasks = {asyncio.create_task(read()), asyncio.create_task(write())}
+        tasks = set()
         try:
+            await socket.accept()
+            tasks = {asyncio.create_task(read()), asyncio.create_task(write())}
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            # Cancelled tasks finish on their own. Waiting for them here stalls the shutdown of a
+            # connection whose client already left, and the server then cancels this handler.
             for task in tasks:
                 task.cancel()
             service.events.unsubscribe(subscription)

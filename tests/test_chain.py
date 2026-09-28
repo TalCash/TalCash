@@ -122,6 +122,31 @@ def test_orphans_wait_for_their_parent():
     assert_matches(node, ref)
 
 
+def test_bad_orphan_body_cannot_hide_the_valid_block():
+    ref = reference(2)
+    node = new_node()
+    good = ref.blocks[2]
+    bad = Block(good.header, (replace(good.coinbase, memo=b"altered"),))
+    assert bad.block_id == good.block_id
+    result = node.submit_block(bad)
+    assert result.outcome is Outcome.INVALID
+    assert result.error.code == "bad-merkle-root"
+    assert node.submit_block(good).outcome is Outcome.ORPHAN
+    node.submit_block(ref.blocks[1])
+    assert_matches(node, ref)
+
+
+def test_oversized_orphan_is_not_cached():
+    ref = reference(2)
+    node = new_node()
+    good = ref.blocks[2]
+    oversized = Block(good.header, good.transactions * (PARAMS.max_block_size // good.coinbase.size + 1))
+    result = node.submit_block(oversized)
+    assert result.outcome is Outcome.INVALID
+    assert result.error.code == "block-too-large"
+    assert not node._orphans
+
+
 def test_switches_to_the_branch_with_more_work_and_back():
     base = reference(8)
     a, b = branch(base), branch(base)
