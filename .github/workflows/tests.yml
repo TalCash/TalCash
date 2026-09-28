@@ -1,0 +1,44 @@
+# Runs the whole test suite on every push and pull request, with the newest library versions,
+# on every Python version TalCash supports (Linux) and on Windows.
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: windows-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install TalCash and the newest dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade -e ".[dev]"
+          python -m pip list
+      - name: Run the tests
+        run: python -m pytest -q
