@@ -21,8 +21,11 @@ Public mode (a node listening on a network, not just this computer): clients
 other than this computer (and addresses given with --trust) are limited:
 20 requests a second (bursts of 100, then 429 "rate-limited"), no mining
 endpoints (403 "local-only"), lists of at most 100 items, and at most 4
-WebSocket subscriptions per address. Behind a reverse proxy every client
-would look local, so don't put a public node behind one.
+WebSocket subscriptions per address. Web pages anywhere may call a public
+node from the browser (CORS, without cookies). A reverse proxy on this
+computer (e.g. Caddy for HTTPS) must pass the visitor's address in
+X-Forwarded-For, as Caddy and nginx do; the node then limits the visitor,
+not the proxy (see server.py).
 """
 
 import asyncio
@@ -35,6 +38,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import FastAPI, Query, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
@@ -136,6 +140,12 @@ def create_app(
                 return JSONResponse({"error": "local-only", "detail": "mining is only open to this computer"},
                                     status_code=403)
         return await call_next(request)
+
+    if policy.public:
+        # Added last, so it wraps everything: rate-limit answers carry CORS headers too, and a
+        # browser page can see the 429 instead of a network error. No credentials: nothing to steal.
+        app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"],
+                           allow_headers=["Content-Type"], expose_headers=["Retry-After"], max_age=3600)
 
     def service_of(request: Request) -> NodeService:
         return request.app.state.service

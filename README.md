@@ -140,7 +140,8 @@ tc wallet history
 `tc` is `python -m talcash` until you `pip install -e .`. Put `--network testnet|devnet`
 before `wallet` for other networks. Wallets live in `~/.talcash/<network>/wallet.json` (change
 with `--datadir` or `TALCASH_HOME`). Commands that need a node talk to the one on this computer,
-else to the network's public node (testnet); use `wallet --node http://host:port ...` for another.
+else to the network's public node (testnet: https://testnet.talcash.com); use
+`wallet --node http://host:port ...` for another.
 
 All your addresses come from your 24 words, in order (#0, #1, ...). After a restore the wallet
 asks the node which of them were used and adds them, stopping after 20 unused ones in a row (the

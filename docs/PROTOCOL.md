@@ -377,8 +377,15 @@ told otherwise. Interactive documentation is served at `/docs`.
   from other machines) limits every client that isn't this computer or an address given with
   `--trust`: 20 requests a second (bursts of 100), no mining endpoints, lists of at most 100 items,
   at most 4 WebSocket subscriptions per address and 100 topics each, 2,000 open connections in all.
-  A WebSocket counts toward these limits from the start of its handshake.
-  Behind a reverse proxy every client would look local, so a public node shouldn't sit behind one.
+  A WebSocket counts toward these limits from the start of its handshake. Any web page may call a
+  public node from the browser (CORS: any origin, GET and POST, no credentials); a node that isn't
+  public sends no CORS headers, so web pages can't read a node running on your computer.
+- **Behind a reverse proxy** (e.g. Caddy adding HTTPS): only a proxy on the same computer
+  (127.0.0.1 or ::1) is believed about the visitor's address, taken from `X-Forwarded-For` (the
+  last address the proxy added), and the limits above apply to that visitor. This is fixed in the
+  code; the `FORWARDED_ALLOW_IPS` environment variable can't widen it. Requests from this computer
+  without that header keep full access. The proxy must replace or append `X-Forwarded-For`, as Caddy
+  and nginx do. The public testnet node's API is at `https://testnet.talcash.com` this way.
 
 | Endpoint | |
 |---|---|
@@ -470,5 +477,5 @@ types are ignored, so later versions can add messages.
   never forgotten after failed dials, but unlike `--peer` addresses they are not allowed to resolve
   to private addresses. A node whose own public URL is a seed never dials itself. `--no-seeds` turns
   them off. The wallet likewise falls back to the network's public node API
-  (`http://testnet.talcash.com:64185`) when none answers on this computer, and refuses a suggested
+  (`https://testnet.talcash.com`) when none answers on this computer, and refuses a suggested
   fee above 1,000 base units per byte unless the user sets `--fee`.

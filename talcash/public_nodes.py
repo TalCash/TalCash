@@ -12,6 +12,7 @@ SEEDS: dict[str, tuple[str, ...]] = {
 }
 
 # `tc wallet` uses this node's API when you give no --node and none answers on this computer.
+# HTTPS (a reverse proxy in front of the node), so nobody on the way can read or change the answers.
 PUBLIC_API: dict[str, str] = {
-    "testnet": "http://testnet.talcash.com:64185",
+    "testnet": "https://testnet.talcash.com",
 }

@@ -19,6 +19,11 @@ from .p2p import MAX_MESSAGE_BYTES, P2PConfig
 from .service import NodeService, print_now
 
 HOUSEKEEPING_SECONDS = 60
+# A reverse proxy on this computer (e.g. Caddy adding HTTPS) passes the visitor's address in
+# X-Forwarded-For; only such a local proxy is believed. Fixed here, so the FORWARDED_ALLOW_IPS
+# environment variable can't widen it: a stranger claiming "X-Forwarded-For: 127.0.0.1" would
+# otherwise get this computer's full access.
+LOCAL_PROXIES = ["127.0.0.1", "::1"]
 
 
 async def mining_loop(
@@ -128,8 +133,11 @@ def run_node(
         background.append(lambda service: mining_loop(
             service, miner, workers=workers, blocks=blocks, on_finished=stop if blocks is not None else None))
 
-    config = uvicorn.Config(create_app(open_service, background, p2p, policy), host=host, port=port,
-                            log_level="warning", ws="websockets-sansio", ws_max_size=MAX_MESSAGE_BYTES, lifespan="on",
-                            limit_concurrency=2000 if public else None)
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(server_config(create_app(open_service, background, p2p, policy), host, port, public))
     server.run()
+
+
+def server_config(app, host: str, port: int, public: bool) -> uvicorn.Config:
+    return uvicorn.Config(app, host=host, port=port, log_level="warning", ws="websockets-sansio",
+                          ws_max_size=MAX_MESSAGE_BYTES, lifespan="on", limit_concurrency=2000 if public else None,
+                          proxy_headers=True, forwarded_allow_ips=LOCAL_PROXIES)
