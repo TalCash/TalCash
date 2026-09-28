@@ -365,9 +365,10 @@ def create_app(
             tasks = {asyncio.create_task(read()), asyncio.create_task(write())}
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            # Cancelled tasks finish on their own. Waiting for them here stalls the shutdown of a
+            # connection whose client already left, and the server then cancels this handler.
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
             service.events.unsubscribe(subscription)
             if not trusted:
                 websockets[host] -= 1
