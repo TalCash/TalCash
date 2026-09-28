@@ -326,6 +326,8 @@ class PeerManager:
         self.retry_at: dict[str, float] = {}
         self.failures: dict[str, int] = {}
         self.sync_peer: Peer | None = None
+        self._chunk_task: asyncio.Task | None = None
+        self._chunk_check: asyncio.Future | None = None
         self.banned: dict[str, float] = {}  # node id -> refused until (monotonic time)
         self.banned_hosts: dict[str, float] = {}  # IP address -> refused until (never this computer)
         self.rejected_txs = _Recent()
@@ -392,16 +394,33 @@ class PeerManager:
                     last_save = time.monotonic()
                 await asyncio.sleep(CHECK_INTERVAL)
         finally:
+            self.sync_peer = None
+            self._cancel_chunk_sync()
             self._save_peers()
             for task in list(self._tasks):
                 task.cancel()
             for peer in list(self.peers):
                 await peer.close()
 
-    def _spawn(self, coroutine) -> None:
+    def _spawn(self, coroutine) -> asyncio.Task:
         task = asyncio.create_task(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
+
+    def _cancel_chunk_sync(self) -> None:
+        task, self._chunk_task = self._chunk_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _chunk_check_finished(self, future: asyncio.Future) -> None:
+        # A cancelled sync no longer awaits the worker; still consume its exception.
+        if not future.cancelled():
+            future.exception()
+        if self._chunk_check is future:
+            self._chunk_check = None
+            if self._chunk_task is not None and self.sync_peer is not None:
+                self.sync_peer.last_progress = time.monotonic()
 
     def _dial_more(self) -> None:
         connected = {p.url for p in self.peers if p.url}
@@ -522,6 +541,7 @@ class PeerManager:
                 self.log(f"{peer.label} {reason}")
             if self.sync_peer is peer:
                 self.sync_peer = None
+                self._cancel_chunk_sync()
                 self._maybe_sync()
 
     def _parse(self, text: str) -> dict:
@@ -554,6 +574,7 @@ class PeerManager:
         peer.closed = True  # at once: nothing more gets sent to it or taken from it
         if self.sync_peer is peer:
             self.sync_peer = None
+            self._cancel_chunk_sync()
         self._spawn(peer.close())
         self._maybe_sync()
 
@@ -773,6 +794,7 @@ class PeerManager:
             self._start_sync(max(candidates, key=lambda p: p.work))
 
     def _start_sync(self, peer: Peer) -> None:
+        self._cancel_chunk_sync()
         self.sync_peer = peer
         peer.sync_round += 1
         peer.header_tip, peer.more_headers = None, False
@@ -782,7 +804,7 @@ class PeerManager:
         peer.last_progress = time.monotonic()
         self.log(f"catching up from {peer.label} (our height {self.service.chain.tip_height})")
         if peer.http_url and peer.chunks > self.service.store.sealed_chunks():
-            self._spawn(self._sync_chunks(peer))  # whole days first, then the rest headers first
+            self._chunk_task = self._spawn(self._sync_chunks(peer, peer.sync_round))
         else:
             self._request_headers(peer)
 
@@ -795,6 +817,7 @@ class PeerManager:
         peer.waiting.clear()
         peer.in_flight.clear()
         self.sync_peer = None
+        self._cancel_chunk_sync()
         self._maybe_sync()
 
     def _request_headers(self, peer: Peer) -> None:
@@ -804,12 +827,26 @@ class PeerManager:
         peer.awaiting_headers = True
         peer.send({"type": "get_headers", "locator": [i.hex() for i in locator]})
 
-    async def _sync_chunks(self, peer: Peer) -> None:
+    async def _sync_chunks(self, peer: Peer, sync_round: int) -> None:
         """Download and import the peer's sealed chunks we don't have yet."""
         loop = asyncio.get_running_loop()
         params = self.service.params
+
+        def current() -> bool:
+            return peer is self.sync_peer and not peer.closed and peer.sync_round == sync_round
+
         try:
-            while peer is self.sync_peer and not peer.closed:
+            while current():
+                # Cancelling run_in_executor cannot stop its thread. Keep the future
+                # alive and let it finish before starting another download/check.
+                previous = self._chunk_check
+                if previous is not None:
+                    try:
+                        await asyncio.shield(previous)
+                    except Exception:
+                        pass  # the abandoned round owns this result, not this peer
+                    if not current():
+                        return
                 index = self.service.store.sealed_chunks()
                 if index >= peer.chunks:
                     break
@@ -820,12 +857,19 @@ class PeerManager:
                 except (httpx.HTTPError, httpx.InvalidURL, ProtocolError, OSError, ValueError) as error:
                     self.log(f"couldn't download chunk {index} from {peer.label} ({error}); going block by block")
                     break
+                if not current():
+                    return
                 if data is None:
                     break
                 try:
-                    checked = await loop.run_in_executor(None, partial(
+                    future = loop.run_in_executor(None, partial(
                         check_chunk_file, data, params, max_decoded_bytes=MAX_SYNC_CHUNK_BYTES
                     ))
+                    self._chunk_check = future
+                    future.add_done_callback(self._chunk_check_finished)
+                    checked = await asyncio.shield(future)
+                    if not current():
+                        return
                     self.service.import_chunk(checked, origin=peer)
                 except ChunkTooLarge:
                     self.log(f"chunk {index} exceeds the memory budget; going block by block")
@@ -840,7 +884,10 @@ class PeerManager:
                     return
                 peer.last_progress = time.monotonic()
         finally:
-            if peer is self.sync_peer and not peer.closed:
+            task = asyncio.current_task()
+            if self._chunk_task is task:
+                self._chunk_task = None
+            if current() and not task.cancelling():
                 self._request_headers(peer)
 
     def _on_headers(self, peer: Peer, message: dict) -> None:
@@ -949,6 +996,8 @@ class PeerManager:
             self._end_sync(peer)
 
     def _check_stall(self) -> None:
+        if self._chunk_task is not None and self._chunk_check is not None and not self._chunk_check.done():
+            return  # local validation time is not a stalled peer
         peer = self.sync_peer
         if peer is not None and time.monotonic() - peer.last_progress > STALL_TIMEOUT:
             self._drop(peer, "stopped sending what we asked for; trying another peer", ban=False)
